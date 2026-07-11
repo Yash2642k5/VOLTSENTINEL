@@ -1,0 +1,55 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Environment variables / secrets ---
+.env
+.env.local
+*.key
+
+# --- Database ---
+data/*.db
+data/*.sqlite3
+data/*.db-journal
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- Jupyter (if used for prototyping models) ---
+.ipynb_checkpoints/
+*.ipynb
+
+# --- Generated / large data files ---
+data/generated/
+*.csv
+!data/seed/*.csv
+
+# --- Logs ---
+*.log
+logs/
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/

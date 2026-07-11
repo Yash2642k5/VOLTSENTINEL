@@ -19,11 +19,10 @@ ET AI Hackathon 2026 — Problem Statement 3: _AI for Industrial EV Supply Chain
 7. [Agent Decision Layer](#agent-decision-layer)
 8. [Anomaly & Health Detection Logic](#anomaly--health-detection-logic)
 9. [Data Simulation Approach](#data-simulation-approach)
-10. [Implementation Timeline](#implementation-timeline-11-days)
-11. [Alignment with Judging Criteria](#alignment-with-judging-criteria)
-12. [Expected Deliverables](#expected-deliverables)
-13. [Team](#team)
-14. [Conclusion](#conclusion)
+10. [Alignment with Judging Criteria](#alignment-with-judging-criteria)
+11. [Expected Deliverables](#expected-deliverables)
+12. [Team](#team)
+13. [Conclusion](#conclusion)
 
 ---
 
@@ -300,24 +299,6 @@ flowchart LR
     Demo -.-> Attack
     Merge --> API["→ FastAPI Ingestion"]
 ```
-
----
-
-## Implementation Timeline (11 Days)
-
-| Day | Focus                                                                                                                                                      |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Project setup; begin telemetry simulator (normal battery decay, charging behaviour, and BMS command generation).                                           |
-| 2–3 | Complete simulator; build attack injection logic (no-ticket disable, GPS mismatch, frequency spikes).                                                      |
-| 4   | FastAPI ingestion service and SQLite schema.                                                                                                               |
-| 5–6 | RUL regression model; anomaly detector extended to cover command, thermal, and charging-pattern signals.                                                   |
-| 6–7 | Agent decision layer (`agent/decision_engine.py`): reasoning over merged signals, mocked action functions, charge-discharge and maintenance-trigger logic. |
-| 7–8 | Streamlit dashboard — fleet view, health/thermal/charging charts, agent recommendations panel, alert feed, "Simulate Attack" trigger.                      |
-| 9   | End-to-end integration testing across the full pipeline, including agent decision scenarios.                                                               |
-| 10  | Finalize architecture diagram, presentation deck, and record demo video.                                                                                   |
-| 11  | Buffer, rehearsal, and submission.                                                                                                                         |
-
----
 
 ## Alignment with Judging Criteria
 

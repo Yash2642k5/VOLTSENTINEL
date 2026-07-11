@@ -81,12 +81,13 @@ graph TD
     D --> F[Streamlit Dashboard<br>Unified Fleet View]
     E --> F
     
-    style A fill:#e0e0e0,stroke:#F08080,stroke-width:2px
-    style B fill:#bbdefb,stroke:#F08080,stroke-width:2px
-    style C fill:#e0e0e0,stroke:#F08080,stroke-width:2px
-    style D fill:#b2dfdb,stroke:#F08080,stroke-width:2px
-    style E fill:#ffcdd2,stroke:#F08080,stroke-width:2px
-    style F fill:#e1bee7,stroke:#F08080,stroke-width:2px
+    style A fill:#e0e0e0,stroke:#333,stroke-width:2px
+    style B fill:#bbdefb,stroke:#333,stroke-width:2px
+    style C fill:#e0e0e0,stroke:#333,stroke-width:2px
+    style D fill:#b2dfdb,stroke:#333,stroke-width:2px
+    style E fill:#ffcdd2,stroke:#333,stroke-width:2px
+    style F fill:#e1bee7,stroke:#333,stroke-width:2px
+    linkStyle default color:#F08080;
 ```
 
 ### Component Overview

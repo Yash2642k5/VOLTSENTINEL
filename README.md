@@ -73,6 +73,7 @@ VoltSentinel operates a layer above individual BMS companion apps. It is a **fle
 The system follows a linear data pipeline that branches into two analytical consumers before converging into one unified Streamlit output.
 
 ```mermaid
+%%{init: {'themeVariables': { 'textColor': '#F08080', 'edgeLabelText': '#F08080'}}}%%
 graph TD
     A[Python Simulator<br>numpy / pandas] -->|Generates telemetry & tickets| B[FastAPI Ingestion Service<br>REST / WebSocket]
     B --> C[(SQLite Data Store)]
@@ -88,7 +89,7 @@ graph TD
     style D fill:#b2dfdb,stroke:#333,stroke-width:2px,color:#F08080
     style E fill:#ffcdd2,stroke:#333,stroke-width:2px,color:#F08080
     style F fill:#e1bee7,stroke:#333,stroke-width:2px,color:#F08080
-    linkStyle default stroke:#333,color:#F08080;
+    linkStyle default stroke:#333;
 ```
 
 ### Component Overview

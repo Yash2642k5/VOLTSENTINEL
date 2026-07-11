@@ -12,8 +12,8 @@
 ## 📌 Project Overview
 **ET AI Hackathon 2026**  
 **Problem Statement 3:** AI for Industrial EV Supply Chain & Asset Intelligence: Accelerating Net Zero  
-**Team Name:** Team BIT  
-**Team Members:** CSE Undergrads, BIT  
+**Team Name:** Team btech10364.23
+**Team Members:** YASH SINHA  
 
 ---
 
@@ -81,12 +81,12 @@ graph TD
     D --> F[Streamlit Dashboard<br>Unified Fleet View]
     E --> F
     
-    style A fill:#e0e0e0,stroke:#333,stroke-width:2px
-    style B fill:#bbdefb,stroke:#333,stroke-width:2px
-    style C fill:#e0e0e0,stroke:#333,stroke-width:2px
-    style D fill:#b2dfdb,stroke:#333,stroke-width:2px
-    style E fill:#ffcdd2,stroke:#333,stroke-width:2px
-    style F fill:#e1bee7,stroke:#333,stroke-width:2px
+    style A fill:#e0e0e0,stroke:#F08080,stroke-width:2px
+    style B fill:#bbdefb,stroke:#F08080,stroke-width:2px
+    style C fill:#e0e0e0,stroke:#F08080,stroke-width:2px
+    style D fill:#b2dfdb,stroke:#F08080,stroke-width:2px
+    style E fill:#ffcdd2,stroke:#F08080,stroke-width:2px
+    style F fill:#e1bee7,stroke:#F08080,stroke-width:2px
 ```
 
 ### Component Overview

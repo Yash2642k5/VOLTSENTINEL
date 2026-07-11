@@ -4,7 +4,7 @@
 
 ET AI Hackathon 2026 — Problem Statement 3: _AI for Industrial EV Supply Chain & Asset Intelligence: Accelerating Net Zero_
 
-> Team Name: `[Add team name]` · Team Members: `[Add member names]`
+> Team Name: `btech10364.23` · Team Members: `Yash Sinha`
 
 ---
 

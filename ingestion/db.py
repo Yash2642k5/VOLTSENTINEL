@@ -33,7 +33,16 @@ DB_PATH = os.path.join("data", "voltsentinel.db")
 # ----------------------------------------------------------------------
 def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # check_same_thread=False: dashboard/utils.py wraps this connection in
+    # st.cache_resource, so the SAME connection object is reused across every
+    # Streamlit rerun -- including the rerun triggered by a widget callback
+    # (e.g. the "Simulate Attack" button), which Streamlit executes on a
+    # different thread than the one that first created this connection.
+    # sqlite3 refuses cross-thread use by default. Safe to disable that check
+    # here specifically because Streamlit processes reruns for a given
+    # session sequentially, never concurrently, so there is no risk of two
+    # threads touching the connection at the same instant.
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

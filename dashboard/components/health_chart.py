@@ -271,6 +271,16 @@ def render_health_chart(conn, vehicle_id: str, profile_df: pd.DataFrame) -> None
 
     with tab_charging:
         suggested_policy = row.get("suggested_policy")
-        if suggested_policy:
+        # charging_analyzer.py returns None (not NaN) for "no concerns" --
+        # but building the fleet profile into a pandas DataFrame silently
+        # converts that None into float('nan') once it shares a column with
+        # other vehicles' real string values. NaN is truthy in Python (a
+        # plain `if suggested_policy:` does not catch it), so without this
+        # explicit null/NaN check every "no concerns" vehicle rendered the
+        # literal text "Suggested charge policy: nan" instead of nothing.
+        # _is_valid_number (defined above) is really a general not-null-or-
+        # NaN check despite the name -- reused here rather than duplicating
+        # the same pd.isnull() logic a second time in this file.
+        if _is_valid_number(suggested_policy):
             st.info(f"Suggested charge policy: {suggested_policy}")
         st.altair_chart(build_charging_chart(telemetry_df), use_container_width=True)

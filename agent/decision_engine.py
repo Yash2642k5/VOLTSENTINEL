@@ -49,7 +49,16 @@ from .prompts import (
     build_decision_prompt,
 )
 
-DEFAULT_MODEL_NAME = "gemini-2.0-flash"
+DEFAULT_MODEL_NAME = "gemini-3.5-flash"
+# gemini-2.0-flash was deprecated by Google on 2026-03-03 (scheduled
+# shutdown mid-to-late 2026) and its free-tier quota is effectively 0 as
+# a result -- every request fails with 429 "limit: 0" regardless of prompt
+# size. gemini-3.5-flash is the current-generation free-tier model as of
+# mid-2026; re-check https://ai.google.dev/gemini-api/docs/rate-limits
+# periodically, since Google has moved this line multiple times in 2026
+# (Pro models were removed from the free tier entirely in April 2026). If
+# this 429s with "limit: 0" for your specific key, confirm the exact free-
+# tier model name in your AI Studio project page and swap it in here.
 DEFAULT_TEMPERATURE = 0.2
 MAX_ATTEMPTS = 2  # 1 initial call + 1 retry on a parse/validation failure
 

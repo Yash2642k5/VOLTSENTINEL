@@ -9,19 +9,19 @@ it only wires existing pieces together; no new business logic lives here.
 
 Layout:
     Sidebar — the live "Simulate Attack" trigger (attack_trigger.py) and
-            a manual refresh button, both reachable regardless of which
-            tab is open, since the attack trigger is the demo's single
-            most important interaction.
+              a manual refresh button, both reachable regardless of which
+              tab is open, since the attack trigger is the demo's single
+              most important interaction.
     Tab 1   — Fleet Overview: summary metrics, map, sortable table
-            (fleet_map.py). Selecting a row here is what drives every
-            other tab's "current asset".
+              (fleet_map.py). Selecting a row here is what drives every
+              other tab's "current asset".
     Tab 2   — Asset Detail: per-asset health/thermal/charging charts
-            (health_chart.py) for whichever vehicle is selected.
+              (health_chart.py) for whichever vehicle is selected.
     Tab 3   — Agent: live Perceive->Reason->Decide->Act reasoning and
-            decision history for the selected asset
-            (agent_recommendations.py).
+              decision history for the selected asset
+              (agent_recommendations.py).
     Tab 4   — Alert Feed: fleet-wide reverse-chronological ticker of
-            everything the agent has actually logged (alert_feed.py).
+              everything the agent has actually logged (alert_feed.py).
 
 Vehicle selection is threaded through st.session_state["fleet_map_vehicle_select"]
 — the same key fleet_map.py's selectbox already writes to — rather than a
@@ -45,6 +45,20 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# Load GEMINI_API_KEY (and anything else in .env.example) from a .env file
+# in the project root into the real process environment, BEFORE
+# agent_recommendations.py's get_decision_engine() checks os.environ for it
+# further down in this same import chain. Without this, GEMINI_API_KEY has
+# to be exported in the shell every session — a .env file is the whole
+# point of having .env.example, but nothing was actually loading it.
+# Safe no-op if python-dotenv isn't installed or no .env file exists yet.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
 
 import streamlit as st
 

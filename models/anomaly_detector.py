@@ -100,7 +100,32 @@ class AnomalyDetector:
             )
 
         df = commands_df.copy()
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
+        # format="ISO8601": this column can contain a MIX of naive strings
+        # (simulator-seeded rows, e.g. "2026-01-03T02:25:23.626357") and
+        # tz-aware strings (live attack_trigger.py injections, e.g.
+        # "...+00:00") once the dashboard's "Simulate Attack" button has been
+        # used against a seeded DB. pandas' default to_datetime() infers a
+        # single format from the first rows and raises ValueError the moment a
+        # row does not match it; ISO8601 mode parses each value independently
+        # as long as it is valid ISO 8601, which every timestamp this system
+        # ever writes always is.
+        # utc=True: pandas additionally refuses to represent a mix of naive
+        # and tz-aware values in one column at all ("Mixed timezones
+        # detected...") unless told how to reconcile them -- utc=True converts
+        # every value to a common UTC representation first. The tz_localize(None)
+        # call right below then strips that down to naive-but-UTC-normalized,
+        # which is what every comparison later in this function assumes.
+        # Real (non-simulated) clients may send timezone-aware timestamps
+        # (e.g. attack_trigger.py's live injections use datetime.now(timezone.utc)).
+        # pandas' Series.values silently drops tz info on tz-aware columns, so the
+        # per-row pd.Timestamp(...) reconstruction in the frequency-spike loop below
+        # would otherwise come back naive and raise "Invalid comparison" against this
+        # still-tz-aware column. Normalize once, here, so every downstream comparison
+        # in this function operates on consistently naive timestamps regardless of
+        # whether the source was the simulator (already naive) or a live/real client.
+        if df["timestamp"].dt.tz is not None:
+            df["timestamp"] = df["timestamp"].dt.tz_localize(None)
         # Sort for windowed frequency calc, but deliberately keep the original
         # index intact (no reset_index) so any index-based join a caller does
         # afterwards — e.g. reattaching a ground-truth column — stays aligned
@@ -162,7 +187,29 @@ class AnomalyDetector:
             )
 
         df = telemetry_df.copy()
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
+        # format="ISO8601": this column can contain a MIX of naive strings
+        # (simulator-seeded rows, e.g. "2026-01-03T02:25:23.626357") and
+        # tz-aware strings (live attack_trigger.py injections, e.g.
+        # "...+00:00") once the dashboard's "Simulate Attack" button has been
+        # used against a seeded DB. pandas' default to_datetime() infers a
+        # single format from the first rows and raises ValueError the moment a
+        # row does not match it; ISO8601 mode parses each value independently
+        # as long as it is valid ISO 8601, which every timestamp this system
+        # ever writes always is.
+        # utc=True: pandas additionally refuses to represent a mix of naive
+        # and tz-aware values in one column at all ("Mixed timezones
+        # detected...") unless told how to reconcile them -- utc=True converts
+        # every value to a common UTC representation first. The tz_localize(None)
+        # call right below then strips that down to naive-but-UTC-normalized,
+        # which is what every comparison later in this function assumes.
+        # Same normalization as detect_command_anomalies, applied here defensively —
+        # the ramp calc below only ever diffs two values pulled through the same
+        # .values -> pd.Timestamp path so it happens not to be broken by tz-aware
+        # input today, but keeping this column naive is what keeps it that way if
+        # this function ever compares df["timestamp"] against an external Timestamp.
+        if df["timestamp"].dt.tz is not None:
+            df["timestamp"] = df["timestamp"].dt.tz_localize(None)
         # Same reasoning as detect_command_anomalies: keep original index intact.
         df = df.sort_values(["vehicle_id", "cycle"])
 

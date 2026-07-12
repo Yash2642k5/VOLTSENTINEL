@@ -112,7 +112,32 @@ class RiskEngine:
         return "minimal"
 
     # ------------------------------------------------------------------
+    _EMPTY_PROFILE_COLUMNS = [
+        "vehicle_id", "status", "current_cycle", "current_capacity_pct",
+        "fitted_a", "fitted_decay_rate", "r_squared", "eol_cycle",
+        "rul_cycles", "end_of_life_capacity_pct",
+        "thermal_anomaly_count", "critical_temp_count", "latest_temp_c",
+        "unticketed_command_count", "max_security_severity", "suspicious_command_count",
+        "total_cycles", "fast_charge_frequency_pct", "mean_dod_pct",
+        "high_dod_frequency_pct", "fleet_fast_charge_baseline_pct",
+        "fast_charge_vs_baseline_pct", "stress_trend", "charge_stress_score",
+        "suggested_policy", "overall_risk_level",
+    ]
+
     def build_fleet_profile(self, conn: sqlite3.Connection) -> pd.DataFrame:
+        from ingestion.db import get_all_vehicle_ids
+
+        # An empty DB (nothing ingested yet, or freshly created) means every
+        # per-model DataFrame below comes back as pd.DataFrame([]) — which has
+        # NO columns at all, not even vehicle_id. Merging on "vehicle_id" in
+        # that state raises KeyError instead of just producing an empty
+        # profile. Short-circuit here so the dashboard's existing "No
+        # vehicles in the fleet profile yet" empty-state message (already
+        # handled downstream in fleet_map.py / utils.py) actually gets a
+        # chance to render, instead of the whole page crashing first.
+        if not get_all_vehicle_ids(conn):
+            return pd.DataFrame(columns=self._EMPTY_PROFILE_COLUMNS)
+
         rul_df = self.rul_model.fit_fleet(conn)
         thermal_df = self._aggregate_thermal(conn)
         security_df = self._aggregate_security(conn)

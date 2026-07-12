@@ -60,7 +60,14 @@ DEFAULT_MODEL_NAME = "gemini-3.5-flash"
 # this 429s with "limit: 0" for your specific key, confirm the exact free-
 # tier model name in your AI Studio project page and swap it in here.
 DEFAULT_TEMPERATURE = 0.2
-MAX_ATTEMPTS = 2  # 1 initial call + 1 retry on a parse/validation failure
+MAX_ATTEMPTS = 3  # 1 initial call + 2 retries on a parse/validation failure
+# Bumped from 2 -> 3: response_mime_type="application/json" is best-effort
+# JSON mode, not a hard schema guarantee -- Gemini occasionally embeds a raw
+# unescaped quote or newline inside a string value (most often when a
+# rationale quotes a coordinate or phrase), which breaks the parser mid-
+# string. _attempt_json_repair() below fixes the most common shapes of that
+# before giving up, but a third attempt costs little and catches whatever
+# repair can't.
 
 
 class DecisionParseError(Exception):
@@ -117,12 +124,57 @@ def _strip_code_fence(text: str) -> str:
     return text.strip()
 
 
+def _attempt_json_repair(text: str) -> Optional[str]:
+    """Best-effort repair for the most common way Gemini's JSON-mode output
+    still comes back malformed despite response_mime_type="application/json"
+    (that setting is best-effort, not a hard schema guarantee): a string
+    value — almost always a `rationale` that quotes a coordinate or phrase —
+    contains a raw, unescaped double-quote or newline, which breaks the
+    parser mid-string with an "Expecting ',' delimiter" error partway
+    through the document.
+
+    Delegates to the json-repair library rather than a hand-rolled regex
+    fix. A naive "insert one comma at the parser's failure position" repair
+    was tried first and FAILED on real malformed output — the text
+    following an unescaped quote (e.g. `in transit" and no matching
+    ticket.",`) usually isn't valid JSON structure no matter where a single
+    comma goes, since the actual bug is a missing pair of escape
+    characters, not a missing delimiter. json-repair re-scans for the
+    intended string boundary and re-escapes correctly instead of patching
+    the symptom.
+
+    Returns a repaired string that DOES parse if a fix was found, else
+    None — never returns something that still fails to parse, so callers
+    can trust a non-None result outright without a second try/except.
+    """
+    from json_repair import repair_json
+
+    try:
+        candidate = repair_json(text)
+    except Exception:
+        return None
+
+    if not candidate:
+        return None
+
+    try:
+        json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+
+    return candidate
+
+
 def _validate_and_normalize(raw_text: str, expected_vehicle_id: str) -> Dict[str, Any]:
     text = _strip_code_fence(raw_text)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
-        raise DecisionParseError(f"invalid JSON: {e}")
+        repaired = _attempt_json_repair(text)
+        if repaired is not None:
+            data = json.loads(repaired)  # already verified to parse in _attempt_json_repair
+        else:
+            raise DecisionParseError(f"invalid JSON: {e}")
 
     if not isinstance(data, dict):
         raise DecisionParseError("response is not a JSON object")

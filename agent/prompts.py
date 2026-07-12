@@ -83,7 +83,11 @@ you were given (explainable and auditable) — never a generic statement like "a
 attention." If you recommend nothing, say explicitly why the observed signals don't meet \
 the bar for action.
 
-Respond with ONLY a single JSON object matching this schema, no prose before or after:
+Respond with ONLY a single JSON object matching this schema, no prose before or after. \
+The response must be strictly valid JSON: escape every double-quote and newline that \
+appears inside a string value (e.g. write \\" for a quoted phrase or coordinate inside a \
+rationale, never a bare unescaped "), and never leave a trailing comma before a closing \
+} or ].
 {
   "vehicle_id": "<string, echoed from input>",
   "actions": [

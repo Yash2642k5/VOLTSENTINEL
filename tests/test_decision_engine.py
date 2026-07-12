@@ -262,6 +262,85 @@ class TestValidateAndNormalize:
 
 
 # ----------------------------------------------------------------------
+# JSON repair — Gemini's response_mime_type="application/json" is
+# best-effort, not a hard guarantee. These reproduce a real failure seen in
+# production: a rationale that quotes a coordinate/phrase without escaping
+# the inner quotes, which breaks json.loads mid-string with "Expecting ','
+# delimiter" partway through an otherwise well-formed document.
+# ----------------------------------------------------------------------
+class TestJsonRepair:
+    def test_unescaped_quote_in_rationale_is_repaired(self):
+        """The exact failure shape that motivated adding repair at all:
+        json.loads alone raises here; _validate_and_normalize must recover
+        it via _attempt_json_repair rather than falling back."""
+        malformed = (
+            '{"vehicle_id": "EVR-0003", "actions": [{"action_type": '
+            '"security_escalation", "priority": "high", "rationale": '
+            '"Unticketed command with GPS 12.99, 77.60 "in transit" and no '
+            'matching ticket.", "parameters": {}}], "summary": "needs review"}'
+        )
+        # Confirm this really is malformed before asserting the repair path
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(malformed)
+
+        data = _validate_and_normalize(malformed, "EVR-0003")
+        assert data["vehicle_id"] == "EVR-0003"
+        assert data["actions"][0]["action_type"] == "security_escalation"
+        # Content should be preserved, not silently dropped by the repair
+        assert "in transit" in data["actions"][0]["rationale"]
+
+    def test_trailing_comma_is_repaired(self):
+        malformed = (
+            '{"vehicle_id": "EVR-0001", "actions": [{"action_type": "no_action", '
+            '"priority": "low", "rationale": "fine", "parameters": {},}], '
+            '"summary": "ok",}'
+        )
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(malformed)
+
+        data = _validate_and_normalize(malformed, "EVR-0001")
+        assert data["vehicle_id"] == "EVR-0001"
+
+    def test_genuinely_unrepairable_input_still_raises(self):
+        """Repair must not turn 'nonsense' into a false-positive parse that
+        silently produces a wrong/empty decision — plain prose should still
+        fail loudly rather than be coerced into something misleading."""
+        with pytest.raises(DecisionParseError):
+            _validate_and_normalize(
+                "The vehicle looks fine, no action needed.", "EVR-0001"
+            )
+
+    def test_repair_cannot_bypass_vehicle_id_validation(self):
+        """A repaired-but-wrong-vehicle response must still be rejected by
+        the same mismatch guard as a clean response would be — repair only
+        fixes syntax, never relaxes the semantic checks after it."""
+        malformed_wrong_vehicle = (
+            '{"vehicle_id": "EVR-9999", "actions": [{"action_type": "no_action", '
+            '"priority": "low", "rationale": "x", "parameters": {},}]}'
+        )
+        with pytest.raises(DecisionParseError):
+            _validate_and_normalize(malformed_wrong_vehicle, "EVR-0001")
+
+    def test_attempt_json_repair_returns_none_for_unfixable_input(self):
+        from agent.decision_engine import _attempt_json_repair
+
+        result = _attempt_json_repair("not json and not fixable prose")
+        # json_repair is aggressive and may return *something* parseable
+        # (e.g. wrapping stray text as a JSON string) -- what matters is the
+        # contract: if it returns non-None, that value must actually parse.
+        if result is not None:
+            json.loads(result)  # must not raise
+
+    def test_attempt_json_repair_returns_valid_input_unchanged_in_spirit(self):
+        from agent.decision_engine import _attempt_json_repair
+
+        valid = json.dumps({"vehicle_id": "EVR-0001", "actions": []})
+        result = _attempt_json_repair(valid)
+        assert result is not None
+        assert json.loads(result) == json.loads(valid)
+
+
+# ----------------------------------------------------------------------
 # _fallback_decision
 # ----------------------------------------------------------------------
 class TestFallbackDecision:

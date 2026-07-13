@@ -17,6 +17,15 @@ Uses pydeck for the map (bundled with Streamlit as a dependency of
 st.pydeck_chart) rather than st.map's newer color= parameter, since
 pydeck's ScatterplotLayer API has been stable for a long time and
 doesn't depend on the caller being on a very recent Streamlit version.
+
+Table columns use layman-friendly labels (e.g. "Battery Status" instead
+of "RUL Status") since the primary audience — fleet managers — isn't
+expected to know APM/battery-engineering jargon. The map also honours
+st.session_state["map_focus_vehicle"], set by attack_trigger.py right
+after an attack is injected, so the map automatically zooms to the
+affected vehicle instead of requiring the manager to find it manually.
+The same session key is used to highlight that vehicle's row in the
+fleet table in red, so it's visually unmistakable in both places.
 """
 
 from __future__ import annotations
@@ -40,12 +49,16 @@ from dashboard.utils import (
     get_latest_vehicle_locations,
     get_vehicle_ids,
     risk_level_label,
+    security_plain_label,
     status_label,
+    status_plain_label,
 )
 from models.anomaly_detector import DEFAULT_DEPOT_LOCATIONS
 
 DEPOT_MARKER_COLOR = [66, 66, 66, 200]       # dark gray, for depot reference points
 DEPOT_LABELS = ("Bengaluru Depot", "Delhi Depot", "Mumbai Depot")  # order matches DEFAULT_DEPOT_LOCATIONS
+
+ATTACKED_ROW_STYLE = "background-color: #4A1420; color: #FF8A80; font-weight: 700;"
 
 
 def _hex_to_rgba(hex_color: str, alpha: int = 200) -> List[int]:
@@ -72,11 +85,12 @@ def render_fleet_summary_metrics(profile_df: pd.DataFrame) -> None:
 
     badges = " ".join(
         f"<span style='background-color:{RISK_LEVEL_COLORS[level]};color:white;"
-        f"padding:2px 10px;border-radius:12px;font-size:0.8rem;font-weight:600;"
-        f"margin-right:6px;'>{risk_level_label(level)}: {stats['risk_counts'][level]}</span>"
+        f"padding:3px 12px;border-radius:14px;font-size:0.8rem;font-weight:600;"
+        f"margin-right:6px;box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
+        f"{risk_level_label(level)}: {stats['risk_counts'][level]}</span>"
         for level in RISK_LEVEL_ORDER
     )
-    st.markdown(badges, unsafe_allow_html=True)
+    st.markdown(f"<div style='margin-top:6px;'>{badges}</div>", unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------
@@ -85,7 +99,9 @@ def render_fleet_summary_metrics(profile_df: pd.DataFrame) -> None:
 def build_fleet_table_view(profile_df: pd.DataFrame) -> pd.DataFrame:
     """Pure transform: picks/renames/formats the columns worth showing
     in the fleet table, in a fixed risk-descending sort so the assets
-    that most need attention are always at the top."""
+    that most need attention are always at the top. Column labels are
+    plain-English on purpose — this table is what a non-technical fleet
+    manager looks at first."""
     if profile_df.empty:
         return profile_df
 
@@ -97,14 +113,24 @@ def build_fleet_table_view(profile_df: pd.DataFrame) -> pd.DataFrame:
     view = pd.DataFrame({
         "Vehicle": df["vehicle_id"],
         "Risk": df["overall_risk_level"].map(risk_level_label),
-        "RUL Status": df["status"].map(status_label),
-        "Capacity": df["current_capacity_pct"].map(lambda v: format_pct(v)),
-        "RUL": df["rul_cycles"].map(lambda v: format_cycles(v)),
-        "Thermal Anomalies": df["thermal_anomaly_count"].map(lambda v: format_count(v, "anomaly")),
-        "Security": df["max_security_severity"].map(lambda v: str(v).title() if pd.notnull(v) else "None"),
-        "Charge Stress": df["charge_stress_score"].map(lambda v: format_pct(v, decimals=0)),
+        "Battery Status": df["status"].map(status_plain_label),
+        "Est. Time Left": df["rul_cycles"].map(lambda v: format_cycles(v)),
+        "Overheating Events": df["thermal_anomaly_count"].map(lambda v: format_count(v, "event")),
+        "Security": df["max_security_severity"].map(security_plain_label),
+        "Charging Stress": df["charge_stress_score"].map(lambda v: format_pct(v, decimals=0)),
     })
     return view
+
+
+def _style_attacked_row(row: pd.Series, attacked_vehicle_id: Optional[str]) -> List[str]:
+    """Returns a per-cell style list for one row of the fleet table —
+    every cell in the currently-attacked vehicle's row gets a red
+    highlight, so it's impossible to miss even if the manager isn't
+    looking at the map or alert feed. No-op (empty style) for every
+    other row."""
+    if attacked_vehicle_id and row.get("Vehicle") == attacked_vehicle_id:
+        return [ATTACKED_ROW_STYLE] * len(row)
+    return [""] * len(row)
 
 
 def render_fleet_table(profile_df: pd.DataFrame) -> Optional[str]:
@@ -116,7 +142,18 @@ def render_fleet_table(profile_df: pd.DataFrame) -> Optional[str]:
         return None
 
     view = build_fleet_table_view(profile_df)
-    st.dataframe(view, use_container_width=True, hide_index=True)
+
+    # attack_trigger.py sets this the moment a live attack is injected —
+    # reused here (same key fleet_map.py's map view already reads) so the
+    # table and map both point at the same vehicle without a second
+    # source of truth.
+    attacked_vehicle_id = st.session_state.get("map_focus_vehicle")
+
+    styled_view = view.style.apply(_style_attacked_row, attacked_vehicle_id=attacked_vehicle_id, axis=1)
+    st.dataframe(styled_view, use_container_width=True, hide_index=True)
+
+    if attacked_vehicle_id and attacked_vehicle_id in view["Vehicle"].values:
+        st.caption(f"🔴 **{attacked_vehicle_id}** is highlighted — unauthorized command detected.")
 
     vehicle_ids = view["Vehicle"].tolist()  # already risk-sorted, so the default is the most urgent asset
     return st.selectbox("Inspect asset", vehicle_ids, key="fleet_map_vehicle_select")
@@ -176,6 +213,23 @@ def build_vehicle_layer(scatter_df: pd.DataFrame) -> pdk.Layer:
 
 
 def _initial_view_state(scatter_df: pd.DataFrame) -> pdk.ViewState:
+    """Zooms to the just-attacked vehicle when
+    st.session_state["map_focus_vehicle"] is set (attack_trigger.py sets
+    this right after injecting an attack), so the fleet manager sees the
+    affected vehicle immediately instead of having to hunt for it on a
+    fleet-wide view. Falls back to the normal fleet-wide average view
+    otherwise."""
+    focus_vehicle = st.session_state.get("map_focus_vehicle")
+    if focus_vehicle and not scatter_df.empty:
+        match = scatter_df[scatter_df["vehicle_id"] == focus_vehicle]
+        if not match.empty:
+            row = match.iloc[0]
+            return pdk.ViewState(
+                latitude=float(row["latitude"]),
+                longitude=float(row["longitude"]),
+                zoom=11,
+            )
+
     depot_lats = [lat for lat, _ in DEFAULT_DEPOT_LOCATIONS]
     depot_lons = [lon for _, lon in DEFAULT_DEPOT_LOCATIONS]
     lats = depot_lats + (scatter_df["latitude"].tolist() if not scatter_df.empty else [])
@@ -226,9 +280,9 @@ def render_fleet_overview(conn) -> Tuple[pd.DataFrame, Optional[str]]:
     profile_df = get_fleet_profile(conn)
 
     render_fleet_summary_metrics(profile_df)
-    st.subheader("Fleet Map")
+    st.markdown("#### 🗺️ Fleet Map")
     render_fleet_map(conn, profile_df)
-    st.subheader("Fleet Assets")
+    st.markdown("#### 📋 Fleet Assets")
     selected_vehicle_id = render_fleet_table(profile_df)
 
     return profile_df, selected_vehicle_id

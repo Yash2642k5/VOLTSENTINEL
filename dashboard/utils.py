@@ -24,6 +24,12 @@ Caching notes:
     is built around a live "Simulate Attack" demo trigger (Phase 5,
     dashboard/components/attack_trigger.py), so a fleet view that never
     refreshes would defeat the point of the demo.
+
+Plain-language labels: STATUS_PLAIN_LABELS / SECURITY_PLAIN_LABELS (and
+their status_plain_label() / security_plain_label() lookup helpers) exist
+specifically for a non-technical fleet-manager audience, alongside the
+existing technical labels (status_label(), etc.) which some components
+still use for badges/logs.
 """
 
 from __future__ import annotations
@@ -79,6 +85,37 @@ ACTION_TYPE_LABELS: Dict[str, str] = {
     "fleet_manager_notification": "Fleet Manager Notification",
     "no_action": "No Action",
 }
+
+# ----------------------------------------------------------------------
+# Plain-language labels — for a non-technical fleet-manager audience.
+# ----------------------------------------------------------------------
+STATUS_PLAIN_LABELS: Dict[str, str] = {
+    "healthy": "Battery is healthy",
+    "watch": "Keep an eye on this one",
+    "degraded": "Needs a checkup soon",
+    "critical": "Needs attention now",
+    "insufficient_data": "Not enough data yet",
+    "no_fit": "Not enough data yet",
+}
+
+SECURITY_PLAIN_LABELS: Dict[str, str] = {
+    "none": "No suspicious activity",
+    "low": "Minor irregularity noticed",
+    "medium": "Suspicious command detected",
+    "high": "Likely unauthorized tampering",
+}
+
+
+def status_plain_label(value: Optional[str]) -> str:
+    if not value:
+        return "Status unknown"
+    return STATUS_PLAIN_LABELS.get(value, "Status unknown")
+
+
+def security_plain_label(value: Optional[str]) -> str:
+    if not value:
+        return "Unknown"
+    return SECURITY_PLAIN_LABELS.get(value, "Unknown")
 
 
 # ----------------------------------------------------------------------

@@ -23,11 +23,17 @@ through ingestion/schemas.py first — so an injected demo command can
 never reach SQLite in a shape the rest of the pipeline wouldn't accept
 from a real client.
 
-Two-step split, matching agent_recommendations.py's "preview vs commit"
+Three-step split, matching agent_recommendations.py's "preview vs commit"
 pattern:
-    build_attack_commands(...) -> pure, no st.*, no DB writes. Testable.
-    inject_attack(...)         -> validates + writes + returns count.
-    render_attack_trigger(...) -> the only function here that touches st.*.
+    build_attack_commands(...)     -> pure, no st.*, no DB writes. Testable.
+    inject_attack(...)             -> validates + writes + returns count.
+    inject_attack_and_notify(...)  -> writes + immediately raises the
+                                       rule-based escalation/notification
+                                       (agent/auto_alert.py), so the fleet
+                                       manager is notified automatically —
+                                       not only when someone opens the
+                                       Agent tab and clicks a button.
+    render_attack_trigger(...)     -> the only function here that touches st.*.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ from ingestion.schemas import CommandEvent
 from dashboard.utils import clear_all_caches, get_vehicle_ids
 from models.anomaly_detector import DEFAULT_DEPOT_LOCATIONS
 from simulator.config import default_config
+from agent.auto_alert import notify_fleet_manager_of_attack
 
 # ----------------------------------------------------------------------
 # Scenario definitions — each maps directly to one of the §7.1 signals
@@ -129,10 +136,30 @@ def inject_attack(conn, vehicle_id: str, scenario: str) -> int:
     """Builds, validates, and writes the scenario's command(s). Returns
     the number of rows actually inserted (insert_command_batch already
     de-dupes on the command_id primary key, so this also matches the
-    idempotency guarantee the rest of the ingestion layer relies on)."""
+    idempotency guarantee the rest of the ingestion layer relies on).
+
+    Kept as a pure validated-write path (no notification side effects)
+    since tests and other callers rely on this exact behaviour."""
     raw_commands = build_attack_commands(vehicle_id, scenario)
     validated = [CommandEvent(**c) for c in raw_commands]
     return insert_command_batch(conn, validated)
+
+
+def inject_attack_and_notify(conn, vehicle_id: str, scenario: str):
+    """UI entrypoint: builds + validates + writes the attack commands,
+    then immediately raises the rule-based escalation/notification for
+    them (agent/auto_alert.py) — so the fleet manager is notified the
+    moment the attack lands, without needing to open the Agent tab and
+    click "Run agent reasoning". inject_attack() itself stays untouched
+    as the pure validated-write path other callers/tests rely on.
+
+    Returns (inserted_count, escalation_record_or_None).
+    """
+    raw_commands = build_attack_commands(vehicle_id, scenario)
+    validated = [CommandEvent(**c) for c in raw_commands]
+    inserted = insert_command_batch(conn, validated)
+    escalation = notify_fleet_manager_of_attack(conn, vehicle_id, raw_commands)
+    return inserted, escalation
 
 
 # ----------------------------------------------------------------------
@@ -173,10 +200,32 @@ def render_attack_trigger(conn, default_vehicle_id: Optional[str] = None) -> Non
     )
 
     if st.button("🚨 Simulate Attack", key="attack_trigger_button", type="primary"):
-        inserted = inject_attack(conn, vehicle_id, scenario)
+        inserted, escalation = inject_attack_and_notify(conn, vehicle_id, scenario)
+
+        # Don't write to "fleet_map_vehicle_select" directly — that widget
+        # may already have been instantiated earlier in this same run
+        # (Fleet Overview tab renders before the sidebar), and Streamlit
+        # forbids mutating a widget's key after it's been created in the
+        # same run. Stash it under a plain key instead; app.py applies it
+        # to the widget key at the top of the NEXT run, before the
+        # selectbox exists yet.
+        st.session_state["pending_vehicle_focus"] = vehicle_id
+        st.session_state["map_focus_vehicle"] = vehicle_id
+
+        if escalation:
+            st.session_state["dashboard_alert"] = {
+                "vehicle_id": vehicle_id,
+                "rationale": escalation["rationale"],
+                "priority": escalation["priority"],
+                "action_id": escalation["action_id"],
+            }
+
         clear_all_caches()
-        st.success(
-            f"Injected {inserted} unauthorized command(s) for {vehicle_id} "
-            f"— {SCENARIOS[scenario]}. Refreshing fleet view..."
-        )
+        if escalation:
+            st.success(
+                f"🚨 Injected {inserted} command(s) for {vehicle_id} — {SCENARIOS[scenario]}. "
+                f"Fleet manager notified (escalation {escalation['action_id']})."
+            )
+        else:
+            st.success(f"Injected {inserted} unauthorized command(s) for {vehicle_id}.")
         st.rerun()

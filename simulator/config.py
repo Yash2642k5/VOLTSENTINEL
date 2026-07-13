@@ -12,7 +12,7 @@ live anywhere else in the simulator package.
 """
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -70,6 +70,15 @@ class SimulatorConfig:
     dod_std_pct: float = 15.0
     high_dod_threshold_pct: float = 85.0       # DoD above this counts as "abusive"
     fleet_fast_charge_baseline_pct: float = 25.0  # fleet-wide baseline used by charging_analyzer
+
+    # ------------------------------------------------------------------
+    # Demo guarantee — force one vehicle to show charging-stress behaviour
+    # so the "suggested charge policy" UI path is always demonstrable,
+    # instead of depending on random chance across the fleet.
+    # ------------------------------------------------------------------
+    demo_stressed_vehicle_index: Optional[int] = 0   # index into vehicle_ids, e.g. EVR-0001
+    demo_stressed_fast_charge_probability: float = 0.85
+    demo_stressed_dod_mean_pct: float = 92.0
 
     # ------------------------------------------------------------------
     # Maintenance ticket generation

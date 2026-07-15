@@ -20,12 +20,19 @@ Layout:
     Tab 1   — Fleet Overview: summary metrics, map, sortable table
               (fleet_map.py). Selecting a row here is what drives every
               other tab's "current asset".
-    Tab 2   — Asset Detail: per-asset health/thermal/charging charts
+    Tab 2   — Fleet BI: default charts (risk mix, RUL distribution,
+              charge-stress vs thermal) plus a chat box wired to
+              agent/bi_chat_engine.py's read-only tool-calling loop —
+              the fleet manager can ask plain-English comparison/ranking/
+              trend questions and get back a chart built from whatever
+              data the agent's tool calls actually returned
+              (bi_chat.py). NEW.
+    Tab 3   — Asset Detail: per-asset health/thermal/charging charts
               (health_chart.py) for whichever vehicle is selected.
-    Tab 3   — Agent: live Perceive->Reason->Decide->Act reasoning and
+    Tab 4   — Agent: live Perceive->Reason->Decide->Act reasoning and
               decision history for the selected asset
               (agent_recommendations.py).
-    Tab 4   — Alert Feed: fleet-wide reverse-chronological ticker of
+    Tab 5   — Alert Feed: fleet-wide reverse-chronological ticker of
               everything the agent has actually logged (alert_feed.py).
 
 Vehicle selection is threaded through st.session_state["fleet_map_vehicle_select"]
@@ -82,6 +89,7 @@ import streamlit as st
 from dashboard.components.agent_recommendations import render_agent_recommendations
 from dashboard.components.alert_feed import render_alert_feed
 from dashboard.components.attack_trigger import render_attack_trigger
+from dashboard.components.bi_chat import render_bi_chat
 from dashboard.components.fleet_map import render_fleet_overview
 from dashboard.components.health_chart import render_health_chart
 from dashboard.utils import clear_all_caches, get_connection, get_vehicle_row
@@ -374,18 +382,21 @@ def main() -> None:
     render_dashboard_alert_banner()
     conn = get_connection()
 
-    tab_fleet, tab_asset, tab_agent, tab_alerts = st.tabs(
-        ["🚗 Fleet Overview", "🔋 Asset Detail", "🤖 Agent", "🔔 Alert Feed"]
+    tab_fleet, tab_bi, tab_asset, tab_agent, tab_alerts = st.tabs(
+        ["🚗 Fleet Overview", "📊 Fleet BI", "🔋 Asset Detail", "🤖 Agent", "🔔 Alert Feed"]
     )
 
     with tab_fleet:
         profile_df, selected_vehicle_id = render_fleet_overview(conn)
 
     # fleet_map.py's selectbox (key "fleet_map_vehicle_select") is the single
-    # source of truth for the current asset — read it back here so tabs 2-4
+    # source of truth for the current asset — read it back here so tabs 2-5
     # and the sidebar all agree on the same selection even though only
     # tab_fleet's body actually rendered the picker widget.
     selected_vehicle_id = st.session_state.get("fleet_map_vehicle_select", selected_vehicle_id)
+
+    with tab_bi:
+        render_bi_chat(conn, profile_df)
 
     with tab_asset:
         if selected_vehicle_id is None:

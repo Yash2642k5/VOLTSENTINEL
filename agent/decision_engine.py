@@ -28,6 +28,15 @@ Design notes:
   - Only agent/decision_engine.py talks to the network. prompts.py /
     actions.py / risk_engine.py stay provider-agnostic and network-free,
     so swapping Gemini for another provider later only touches this file.
+
+CHANGE (BI chat feature): GeminiClient's constructor now accepts an
+optional `system_instruction` override instead of always hardcoding
+prompts.SYSTEM_PROMPT. Default behaviour is 100% unchanged for every
+existing caller (DecisionEngine.create() doesn't pass it, so it still
+gets prompts.SYSTEM_PROMPT exactly as before) — this only exists so
+agent/bi_chat_engine.py (and, next, the incident/security chat) can
+construct their own GeminiClient with a different system prompt instead
+of duplicating this whole class.
 """
 
 from __future__ import annotations
@@ -87,6 +96,7 @@ class GeminiClient:
         api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
         temperature: float = DEFAULT_TEMPERATURE,
+        system_instruction: str = SYSTEM_PROMPT,
     ):
         import google.generativeai as genai
 
@@ -100,7 +110,7 @@ class GeminiClient:
 
         self._model = genai.GenerativeModel(
             model_name=model_name,
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_instruction,
             generation_config=genai.GenerationConfig(
                 temperature=temperature,
                 response_mime_type="application/json",

@@ -16,6 +16,19 @@ exposes actions as *proposals* the fleet manager must explicitly accept
 before anything executes — kept as a clearly separate engine/tool
 registry rather than blurred into this one, so "ask a question about
 the fleet" can never accidentally trigger a write.
+
+Web search: BIChatEngine can optionally reach the open web through
+agent/bi_tools.py's `web_search` tool, backed by a SEPARATE
+GeminiSearchClient (agent/decision_engine.py) — a different client
+object than `client` above, built with its own narrow system prompt
+(BI_WEB_SEARCH_SYSTEM_PROMPT, agent/prompts.py) rather than
+RESEARCH_SYSTEM_PROMPT (which is scoped to the Agent tab's per-asset
+research flow and expects a different response schema). This is
+opt-in: enable_web_search=False by default, matching
+DecisionEngine.create(enable_research=...)'s pattern. When disabled,
+`web_search` is never even registered in the tool catalogue
+build_bi_tools returns (see bi_tools.py), so the model can't call it
+regardless of what the prompt says.
 """
 
 from __future__ import annotations
@@ -25,9 +38,10 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from .bi_tools import build_bi_tools
-from .decision_engine import DEFAULT_MODEL_NAME, DEFAULT_TEMPERATURE, GeminiClient
-from .tool_chat_engine import run_tool_loop
+from agent.bi_tools import build_bi_tools
+from agent.decision_engine import DEFAULT_MODEL_NAME, DEFAULT_TEMPERATURE, GeminiClient, GeminiSearchClient
+from agent.prompts import BI_WEB_SEARCH_SYSTEM_PROMPT
+from agent.tool_chat_engine import run_tool_loop
 
 CHART_TYPES = ("bar", "line", "scatter", "table")
 
@@ -59,7 +73,17 @@ To give your final answer once you have enough information:
 }}
 
 Guidelines:
--If a question has no connection to fleet \
+- Prefer the fleet-data tools (get_fleet_summary, list_vehicles, get_vehicle_profile, \
+compare_vehicles, rank_vehicles, get_vehicle_timeseries, compare_vehicle_timeseries) for \
+anything answerable from this fleet's own data — they're always faster and more \
+reliable than a search.
+- If (and only if) a "web_search" tool is available in your tool list AND the question \
+genuinely needs information this fleet database cannot provide — e.g. "what EV models \
+should replace EVR-0012", industry specifications, or general best practices — call \
+web_search. If web_search is not in your tool list, or the question doesn't need it, do \
+not attempt to search the web; answer from fleet data alone, or explain plainly that the \
+information isn't available in this deployment.
+- If a question has no connection to fleet \
 operations at all (general trivia, coding help, unrelated topics), do not call a \
 tool — respond with a final_answer whose "text" is: "I can only help with questions \
 about your fleet's battery health, charging, security, and operations." and \
@@ -78,7 +102,10 @@ again rather than repeating the same failing call.
 - Vehicle make/model/purchase-date metadata is not currently available — call \
 get_vehicle_metadata to confirm this if asked, and for "which vehicles should I \
 replace" style questions, answer using RUL, thermal-anomaly, and charge-stress \
-signals instead, saying plainly that make/model data isn't wired in yet.
+signals, then use web_search (if available) for actual replacement model suggestions.
+- If you use web_search, cite what you found in "text" and don't present it as fleet \
+data — make clear it's external/general information, not something from this fleet's \
+own telemetry.
 - Keep "text" specific: cite the actual numbers you found, not generic statements."""
 
 
@@ -106,6 +133,7 @@ def _validate_final_answer(raw: Dict[str, Any]) -> Dict[str, Any]:
 @dataclass
 class BIChatEngine:
     client: GeminiClient
+    search_client: Optional[GeminiSearchClient] = None   # None => web_search tool disabled
     max_tool_turns: int = 6
     retry_backoff_seconds: float = 1.0
 
@@ -115,12 +143,25 @@ class BIChatEngine:
         api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
         temperature: float = DEFAULT_TEMPERATURE,
+        enable_web_search: bool = False,
     ) -> "BIChatEngine":
+        """enable_web_search=False by default — matches
+        DecisionEngine.create(enable_research=...)'s opt-in pattern. Even
+        when True, this only ever populates search_client; the actual
+        on/off switch is whether build_bi_tools() registers the
+        `web_search` tool at all (see bi_tools.py), not prompt wording."""
         client = GeminiClient(
             api_key=api_key, model_name=model_name, temperature=temperature,
             system_instruction=BI_SYSTEM_PROMPT,
         )
-        return cls(client=client)
+        search_client = (
+            GeminiSearchClient(
+                api_key=api_key, model_name=model_name, temperature=temperature,
+                system_instruction=BI_WEB_SEARCH_SYSTEM_PROMPT,
+            )
+            if enable_web_search else None
+        )
+        return cls(client=client, search_client=search_client)
 
     def ask(
         self,
@@ -137,7 +178,7 @@ class BIChatEngine:
         rather than data snapshotted at conversation start.
 
         Always returns {"text": str, "chart": dict | None} — never raises."""
-        tools = build_bi_tools(conn, profile_df)
+        tools = build_bi_tools(conn, profile_df, search_client=self.search_client)
 
         transcript: List[str] = []
         for turn in (chat_history or []):

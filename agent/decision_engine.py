@@ -108,7 +108,15 @@ class GeminiClient:
         api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
         temperature: float = DEFAULT_TEMPERATURE,
+        system_instruction: str = SYSTEM_PROMPT,
     ):
+        # system_instruction defaults to the main decide_for_asset/decide_for_fleet
+        # prompt (SYSTEM_PROMPT) so every EXISTING caller — including
+        # DecisionEngine.create() below and every test that constructs a
+        # GeminiClient positionally/by keyword without this arg — behaves
+        # exactly as before. agent/bi_chat_engine.py's BIChatEngine.create()
+        # passes system_instruction=BI_SYSTEM_PROMPT explicitly, reusing this
+        # same class with the BI-chat framing instead of the decision-loop one.
         import google.generativeai as genai
 
         resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -121,7 +129,7 @@ class GeminiClient:
 
         self._model = genai.GenerativeModel(
             model_name=model_name,
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_instruction,
             generation_config=genai.GenerationConfig(
                 temperature=temperature,
                 response_mime_type="application/json",
@@ -147,7 +155,14 @@ class GeminiSearchClient:
         api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
         temperature: float = DEFAULT_TEMPERATURE,
+        system_instruction: str = RESEARCH_SYSTEM_PROMPT,
     ):
+        # system_instruction defaults to RESEARCH_SYSTEM_PROMPT so
+        # DecisionEngine.create(enable_research=True)'s existing construction
+        # is unchanged. agent/bi_tools.py's web_search tool passes
+        # BI_WEB_SEARCH_SYSTEM_PROMPT instead — a much simpler schema (just
+        # {"answer", "sources"}) since scope-gating there is the calling
+        # model's job (BI_SYSTEM_PROMPT), not this client's.
         import google.generativeai as genai
 
         resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -160,7 +175,7 @@ class GeminiSearchClient:
 
         self._model = genai.GenerativeModel(
             model_name=model_name,
-            system_instruction=RESEARCH_SYSTEM_PROMPT,
+            system_instruction=system_instruction,
             generation_config=genai.GenerationConfig(
                 temperature=temperature,
                 response_mime_type="application/json",

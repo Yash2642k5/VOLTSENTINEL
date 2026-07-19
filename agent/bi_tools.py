@@ -21,22 +21,37 @@ codebase (it's the other way around), and importing dashboard.utils
 from here would be a reverse dependency for no real benefit. The small
 amount of stats logic below is intentionally re-derived, not imported.
 
-build_bi_tools(conn, profile_df) constructs the actual Tool objects for
-one chat turn, closing over the already-computed fleet profile (the
-dashboard already caches this via dashboard/utils.get_fleet_profile, so
-tools reuse it instead of re-fitting RUL for the whole fleet on every
-single tool call) and the live DB connection (needed for per-cycle
-telemetry, which isn't part of the aggregate profile).
+build_bi_tools(conn, profile_df, search_client=None) constructs the
+actual Tool objects for one chat turn, closing over the already-computed
+fleet profile (the dashboard already caches this via
+dashboard/utils.get_fleet_profile, so tools reuse it instead of
+re-fitting RUL for the whole fleet on every single tool call), the live
+DB connection (needed for per-cycle telemetry, which isn't part of the
+aggregate profile), and — optionally — a search_client for the one tool
+that leaves the fleet database entirely.
+
+Web search (`web_search` below) is the ONE tool in this registry that
+touches the network. It's opt-in: build_bi_tools only registers it when
+a search_client is passed in (agent/bi_chat_engine.py's
+BIChatEngine.create(enable_web_search=True)), and even then the model is
+instructed (BI_SYSTEM_PROMPT) to prefer every fleet-database tool first
+and only reach for web_search when the question genuinely needs
+information this system doesn't have — e.g. "what EV models should
+replace EVR-0012" (see get_vehicle_metadata's docstring: make/model data
+isn't wired in, so a real answer has to come from the web instead).
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, List
+import json
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
-from .tool_chat_engine import Tool
+from agent.decision_engine import GeminiSearchClient, _attempt_json_repair, _strip_code_fence
+from agent.prompts import build_web_search_prompt
+from agent.tool_chat_engine import Tool
 
 # Curated subset of risk_engine's full profile surfaced to the model —
 # deliberately not every internal fitted parameter (fitted_a,
@@ -90,7 +105,11 @@ def _infer_params(fn: Callable[..., Any]) -> Dict[str, str]:
     return params
 
 
-def build_bi_tools(conn, profile_df: pd.DataFrame) -> Dict[str, Tool]:
+def build_bi_tools(
+    conn,
+    profile_df: pd.DataFrame,
+    search_client: Optional[GeminiSearchClient] = None,
+) -> Dict[str, Tool]:
     def get_fleet_summary() -> Dict[str, Any]:
         """Fleet-wide summary: total vehicle count, risk-level distribution
         (minimal/low/medium/high counts), how many need maintenance, how
@@ -209,24 +228,75 @@ def build_bi_tools(conn, profile_df: pd.DataFrame) -> Dict[str, Tool]:
         """Make/model/purchase-date metadata for a vehicle. NOT YET
         AVAILABLE in this deployment — call this to check before assuming
         it exists; it returns an honest 'unavailable' marker rather than a
-        fabricated make/model, so replacement-suggestion questions should
-        be answered using RUL/thermal/charge-stress signals instead until
-        real vehicle metadata is wired in."""
+        fabricated make/model. For "what should replace this vehicle"
+        style questions, base the assessment on RUL/thermal/charge-stress
+        signals from the fleet tools, and use web_search (if available)
+        for actual replacement model suggestions."""
         return {
             "available": False,
             "message": (
                 "Vehicle make/model/purchase-date metadata isn't wired into "
                 "VoltSentinel yet — only battery telemetry and risk signals "
                 "are available. Base replacement suggestions on RUL, thermal, "
-                "and charge-stress signals until that data is added."
+                "and charge-stress signals, and use web_search for actual "
+                "replacement vehicle/model recommendations if that tool is available."
             ),
         }
+
+    def web_search(query: str) -> Dict[str, Any]:
+        """Searches the public web for information the fleet database
+        cannot provide — e.g. replacement EV or battery-pack models,
+        industry specifications, or general battery/charging best
+        practices. ONLY use this when the fleet-data tools above genuinely
+        can't answer the question; never use it for anything already
+        answerable from get_fleet_summary / list_vehicles / get_vehicle_profile
+        / rank_vehicles / get_vehicle_timeseries, and never for questions
+        unrelated to this fleet's operations. Returns {"answer": str,
+        "sources": [str, ...]} on success, or {"error": str} if web search
+        isn't enabled for this session or the search itself failed."""
+        if search_client is None:
+            return {"error": "web search is not enabled for this session"}
+
+        prompt = build_web_search_prompt(query)
+        try:
+            raw = search_client.generate(prompt)
+        except Exception as e:
+            return {"error": f"web search request failed: {e}"}
+
+        text = _strip_code_fence(raw)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            repaired = _attempt_json_repair(text)
+            if repaired is None:
+                return {"error": "web search returned an unparseable response"}
+            data = json.loads(repaired)
+
+        if not isinstance(data, dict):
+            return {"error": "web search returned a malformed response"}
+
+        answer = data.get("answer")
+        if not isinstance(answer, str) or not answer:
+            return {"error": "web search returned no answer"}
+
+        sources = data.get("sources")
+        sources = [str(s) for s in sources] if isinstance(sources, list) else []
+
+        return {"answer": answer, "sources": sources}
 
     fns = [
         get_fleet_summary, list_vehicles, get_vehicle_profile, compare_vehicles,
         rank_vehicles, get_vehicle_timeseries, compare_vehicle_timeseries,
         get_vehicle_metadata,
     ]
+    # web_search is only ever registered — i.e. only ever visible to the
+    # model as an available tool at all — when a search_client was passed
+    # in. This is the actual on/off switch: an unregistered tool can't be
+    # called regardless of what the system prompt says, so disabling web
+    # search for a session/user doesn't rely on prompt compliance alone.
+    if search_client is not None:
+        fns.append(web_search)
+
     tools: Dict[str, Tool] = {}
     for fn in fns:
         tools[fn.__name__] = Tool(

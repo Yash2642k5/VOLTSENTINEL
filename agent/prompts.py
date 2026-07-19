@@ -170,10 +170,23 @@ Respond with ONLY a single JSON object, no prose before or after:
   "answer": "<your researched answer if in_scope=true, else empty string>",
   "refusal_reason": "<short reason if in_scope=false, else empty string>"
 }}"""
+BI_WEB_SEARCH_SYSTEM_PROMPT = """You are a web search utility invoked by VoltSentinel's BI \
+chat assistant to answer ONE specific query that its own fleet-database tools cannot \
+answer — e.g. researching replacement EV or battery-pack models, industry specifications, \
+or general battery/charging best practices. Search the web and respond with ONLY a single \
+JSON object, no prose before or after, no markdown fences:
+{
+  "answer": "<a concise, factual answer grounded in what you found, 2-5 sentences>",
+  "sources": ["<url>", "..."]
+}
+If the query is unanswerable via search, or you find nothing relevant, still return valid \
+JSON: an empty "sources" list and an "answer" that says so plainly."""
 
 # ----------------------------------------------------------------------
 # Per-asset prompt builder
 # ----------------------------------------------------------------------
+def build_web_search_prompt(query: str) -> str:
+    return f"Query: {query}\n\nOutput:"
 def _fmt(value: Any, suffix: str = "", none_text: str = "unknown") -> str:
     return f"{value}{suffix}" if value is not None else none_text
 

@@ -126,8 +126,23 @@ def get_connection() -> sqlite3.Connection:
     from ingestion.db import get_connection as _get_connection, init_db
 
     conn = _get_connection()
-    init_db(conn)  # no-op if tables already exist; keeps the dashboard runnable standalone
+    init_db(conn)
     return conn
+
+
+def ensure_seeded(_conn: sqlite3.Connection) -> None:
+    """Checked on every rerun (cheap — one COUNT query), not just once per
+    process lifetime. Streamlit Community Cloud's ephemeral disk can lose
+    data/voltsentinel.db without necessarily killing the Python process/
+    cache_resource cache, so gating this behind get_connection() alone
+    isn't reliable — this catches an underlying-file wipe mid-session too.
+    Reseeds automatically if the DB comes back empty; no-ops otherwise."""
+    from ingestion.db import row_counts, DB_PATH
+
+    if row_counts(_conn)["telemetry"] == 0:
+        from scripts.seed_db import seed as _seed_db
+        _seed_db(fleet_size=50, num_cycles=500, random_seed=42, db_path=DB_PATH, wipe=False)
+        clear_all_caches()  # force every @st.cache_data query to reread the freshly seeded rows
 
 
 def clear_all_caches() -> None:

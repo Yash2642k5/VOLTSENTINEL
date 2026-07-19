@@ -92,7 +92,7 @@ from dashboard.components.attack_trigger import render_attack_trigger
 from dashboard.components.bi_chat import render_bi_chat
 from dashboard.components.fleet_map import render_fleet_overview
 from dashboard.components.health_chart import render_health_chart
-from dashboard.utils import clear_all_caches, get_connection, get_vehicle_row
+from dashboard.utils import clear_all_caches, ensure_seeded, get_connection, get_vehicle_row
 
 st.set_page_config(
     page_title="VoltSentinel — EV Battery APM Agent",
@@ -381,6 +381,7 @@ def main() -> None:
     render_header()
     render_dashboard_alert_banner()
     conn = get_connection()
+    ensure_seeded(conn) 
 
     tab_fleet, tab_bi, tab_asset, tab_agent, tab_alerts = st.tabs(
         ["🚗 Fleet Overview", "📊 Fleet BI", "🔋 Asset Detail", "🤖 Agent", "🔔 Alert Feed"]

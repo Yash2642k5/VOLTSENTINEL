@@ -131,6 +131,45 @@ FEW_SHOT_EXAMPLE_OUTPUT = """{
   "summary": "EVR-0042 needs a scheduled maintenance inspection soon due to degraded RUL and recurring thermal anomalies; charging behaviour is mildly elevated but stable and does not need intervention yet."
 }"""
 
+# ----------------------------------------------------------------------
+# Scoped research prompt — the ONLY place in the codebase that permits
+# web search. Deliberately separate from SYSTEM_PROMPT/build_decision_prompt
+# above: those drive decide_for_asset's Perceive->Reason->Decide loop and
+# must stay network-free so every action traces back to an already-computed
+# risk_engine.py signal (see decision_engine.py's module docstring). This
+# prompt is for a narrow, human-triggered "look this up for me" path tied
+# to ONE asset's already-computed profile — not general chat.
+# ----------------------------------------------------------------------
+RESEARCH_ALLOWED_TOPICS = (
+    "replacement vehicle/battery-pack models suited to this asset's profile "
+    "(e.g. it's flagged for maintenance/replacement)",
+    "battery charge-policy best practices relevant to signals already present "
+    "in this asset's profile (e.g. high fast-charge frequency, high DoD)",
+    "manufacturer or part-sourcing information tied to a maintenance trigger "
+    "already logged for this asset",
+    "regulatory/safety context directly tied to a security escalation already "
+    "logged for this asset (e.g. BMS authentication standards)",
+)
+
+RESEARCH_SYSTEM_PROMPT = f"""You are VoltSentinel's scoped research assistant. You have web \
+search access, which NOTHING else in this system has — use it narrowly.
+
+You may answer ONLY questions that are directly tied to the ONE specific fleet asset whose \
+profile you are given, and only within these topics:
+{chr(10).join(f"  - {t}" for t in RESEARCH_ALLOWED_TOPICS)}
+
+You must REFUSE any question outside this list — general knowledge, unrelated topics, \
+requests to act on other systems, or anything not grounded in the specific profile signals \
+you were given. Refusing is the correct, expected output for an out-of-scope question; do \
+not try to be helpful by answering anyway.
+
+Respond with ONLY a single JSON object, no prose before or after:
+{{
+  "vehicle_id": "<string, echoed from input>",
+  "in_scope": <true|false>,
+  "answer": "<your researched answer if in_scope=true, else empty string>",
+  "refusal_reason": "<short reason if in_scope=false, else empty string>"
+}}"""
 
 # ----------------------------------------------------------------------
 # Per-asset prompt builder
@@ -138,6 +177,16 @@ FEW_SHOT_EXAMPLE_OUTPUT = """{
 def _fmt(value: Any, suffix: str = "", none_text: str = "unknown") -> str:
     return f"{value}{suffix}" if value is not None else none_text
 
+
+def build_research_prompt(profile: Dict[str, Any], question: str) -> str:
+    """Pairs the asset's already-computed profile with the human's question,
+    so the model has to ground its search in real signals rather than
+    treating this as an open-ended web-search box."""
+    return (
+        f"Asset profile:\n{format_asset_profile(profile)}\n\n"
+        f"Question: {question}\n\n"
+        "Output:"
+    )
 
 def format_asset_profile(profile: Dict[str, Any]) -> str:
     """Turns one row of models/risk_engine.py's merged profile (as a dict)

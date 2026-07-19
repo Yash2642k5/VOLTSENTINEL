@@ -29,14 +29,20 @@ Design notes:
     actions.py / risk_engine.py stay provider-agnostic and network-free,
     so swapping Gemini for another provider later only touches this file.
 
-CHANGE (BI chat feature): GeminiClient's constructor now accepts an
-optional `system_instruction` override instead of always hardcoding
-prompts.SYSTEM_PROMPT. Default behaviour is 100% unchanged for every
-existing caller (DecisionEngine.create() doesn't pass it, so it still
-gets prompts.SYSTEM_PROMPT exactly as before) — this only exists so
-agent/bi_chat_engine.py (and, next, the incident/security chat) can
-construct their own GeminiClient with a different system prompt instead
-of duplicating this whole class.
+Web search / research addition:
+  - GeminiClient (the main decision loop's client) is UNCHANGED and still
+    has zero tools registered — decide_for_asset()/decide_for_fleet() stay
+    completely air-gapped from the network, so every emitted action still
+    traces back only to an already-computed risk_engine.py signal.
+  - GeminiSearchClient is a SEPARATE client, built with a different system
+    prompt (RESEARCH_SYSTEM_PROMPT) and the only place in this file (or
+    the codebase) that registers a tool. It is reachable only through
+    DecisionEngine.research_asset_question(), never from the main loop.
+  - research_asset_question() is scoped to one asset's already-computed
+    profile and relies on RESEARCH_SYSTEM_PROMPT instructing the model to
+    refuse anything outside a fixed topic list (see agent/prompts.py).
+    Disabled by default — DecisionEngine.create() only builds a
+    search_client when enable_research=True is passed explicitly.
 """
 
 from __future__ import annotations
@@ -54,8 +60,10 @@ from .actions import execute_decision
 from .prompts import (
     ACTION_TYPES,
     PRIORITY_LEVELS,
+    RESEARCH_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     build_decision_prompt,
+    build_research_prompt,
 )
 
 DEFAULT_MODEL_NAME = "gemini-3.5-flash"
@@ -88,7 +96,11 @@ class DecisionParseError(Exception):
 
 # ----------------------------------------------------------------------
 # Gemini client wrapper — isolated so tests can monkeypatch/mock it
-# without touching parsing/validation/dispatch logic.
+# without touching parsing/validation/dispatch logic. Deliberately has
+# NO tools registered — the main decision loop must stay network-free
+# beyond the single Gemini reasoning call itself, per this file's
+# explainability guarantee (every action traces back to a risk_engine.py
+# signal, never to something fetched mid-reasoning).
 # ----------------------------------------------------------------------
 class GeminiClient:
     def __init__(
@@ -96,7 +108,6 @@ class GeminiClient:
         api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
         temperature: float = DEFAULT_TEMPERATURE,
-        system_instruction: str = SYSTEM_PROMPT,
     ):
         import google.generativeai as genai
 
@@ -110,11 +121,51 @@ class GeminiClient:
 
         self._model = genai.GenerativeModel(
             model_name=model_name,
-            system_instruction=system_instruction,
+            system_instruction=SYSTEM_PROMPT,
             generation_config=genai.GenerationConfig(
                 temperature=temperature,
                 response_mime_type="application/json",
             ),
+        )
+
+    def generate(self, user_prompt: str) -> str:
+        response = self._model.generate_content(user_prompt)
+        return response.text
+
+
+# ----------------------------------------------------------------------
+# Search-enabled client — kept entirely separate from GeminiClient above.
+# This is the ONLY client construction in the codebase that registers a
+# tool (Google Search grounding), and it's built with RESEARCH_SYSTEM_PROMPT
+# instead of SYSTEM_PROMPT, so it physically cannot be substituted into the
+# main decision loop by accident — the two prompts encode different
+# contracts (JSON action schema vs. in_scope/answer/refusal schema).
+# ----------------------------------------------------------------------
+class GeminiSearchClient:
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = DEFAULT_MODEL_NAME,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ):
+        import google.generativeai as genai
+
+        resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
+        if not resolved_key:
+            raise RuntimeError(
+                "No Gemini API key found. Pass api_key= explicitly or set "
+                "the GEMINI_API_KEY environment variable."
+            )
+        genai.configure(api_key=resolved_key)
+
+        self._model = genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=RESEARCH_SYSTEM_PROMPT,
+            generation_config=genai.GenerationConfig(
+                temperature=temperature,
+                response_mime_type="application/json",
+            ),
+            tools=[{"google_search": {}}],
         )
 
     def generate(self, user_prompt: str) -> str:
@@ -235,6 +286,39 @@ def _validate_and_normalize(raw_text: str, expected_vehicle_id: str) -> Dict[str
     return data
 
 
+def _validate_and_normalize_research(raw_text: str, expected_vehicle_id: str) -> Dict[str, Any]:
+    """Validator for GeminiSearchClient responses — a completely different,
+    much smaller schema than _validate_and_normalize above (no actions list,
+    no priority/action_type enums). Kept as a separate function rather than
+    branching inside _validate_and_normalize so the two contracts can never
+    accidentally cross-validate each other's output."""
+    text = _strip_code_fence(raw_text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        repaired = _attempt_json_repair(text)
+        if repaired is not None:
+            data = json.loads(repaired)
+        else:
+            raise DecisionParseError(f"invalid JSON: {e}")
+
+    if not isinstance(data, dict) or "in_scope" not in data:
+        raise DecisionParseError("response missing 'in_scope'")
+
+    returned_vid = data.get("vehicle_id")
+    if returned_vid and returned_vid != expected_vehicle_id:
+        raise DecisionParseError(
+            f"vehicle_id mismatch: expected {expected_vehicle_id}, got {returned_vid}"
+        )
+
+    return {
+        "vehicle_id": expected_vehicle_id,
+        "in_scope": bool(data.get("in_scope")),
+        "answer": data.get("answer") or "",
+        "refusal_reason": data.get("refusal_reason") or "",
+    }
+
+
 def _fallback_decision(vehicle_id: str, error: str) -> Dict[str, Any]:
     """Used only when every attempt to get a valid decision from the LLM
     fails. Still a real, logged decision — never a silent drop — so the
@@ -256,12 +340,25 @@ def _fallback_decision(vehicle_id: str, error: str) -> Dict[str, Any]:
     }
 
 
+def _fallback_research(vehicle_id: str, error: str) -> Dict[str, Any]:
+    """Mirrors _fallback_decision's contract for the research path — never
+    raises out of research_asset_question(), always returns a well-shaped
+    refusal instead."""
+    return {
+        "vehicle_id": vehicle_id,
+        "in_scope": False,
+        "answer": "",
+        "refusal_reason": f"Research step failed after {MAX_ATTEMPTS} attempt(s) ({error}).",
+    }
+
+
 # ----------------------------------------------------------------------
 # Decision engine
 # ----------------------------------------------------------------------
 @dataclass
 class DecisionEngine:
     client: GeminiClient
+    search_client: Optional[GeminiSearchClient] = None   # None => research disabled
     include_few_shot: bool = True
     retry_backoff_seconds: float = 1.5
 
@@ -271,8 +368,19 @@ class DecisionEngine:
         api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
         temperature: float = DEFAULT_TEMPERATURE,
+        enable_research: bool = False,
     ) -> "DecisionEngine":
-        return cls(client=GeminiClient(api_key=api_key, model_name=model_name, temperature=temperature))
+        """enable_research=False by default — web search stays off unless a
+        caller explicitly opts in. Even when on, it only ever populates
+        search_client, which is reachable exclusively through
+        research_asset_question() below; decide_for_asset()/decide_for_fleet()
+        never touch it."""
+        client = GeminiClient(api_key=api_key, model_name=model_name, temperature=temperature)
+        search_client = (
+            GeminiSearchClient(api_key=api_key, model_name=model_name, temperature=temperature)
+            if enable_research else None
+        )
+        return cls(client=client, search_client=search_client)
 
     # ------------------------------------------------------------------
     def decide_for_asset(self, profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -333,6 +441,52 @@ class DecisionEngine:
             })
 
         return results
+
+    # ------------------------------------------------------------------
+    # Scoped web research — the ONLY code path in this system with network
+    # access beyond the single reasoning call. See module docstring.
+    # ------------------------------------------------------------------
+    def research_asset_question(self, profile: Dict[str, Any], question: str) -> Dict[str, Any]:
+        """Answers a free-text question about ONE asset, using web search,
+        but only within the topic list RESEARCH_SYSTEM_PROMPT enforces
+        (agent/prompts.py) — e.g. replacement vehicle/battery models,
+        charge-policy best practices, or context tied to a signal already
+        present in `profile`. The model is instructed to set
+        in_scope=False and explain why for anything else (general
+        knowledge, unrelated topics, requests to act on other systems);
+        this method trusts and passes through that refusal rather than
+        second-guessing it.
+
+        Always returns a well-shaped dict — never raises — matching
+        decide_for_asset's fail-safe contract. If research isn't enabled
+        for this engine instance (self.search_client is None), returns an
+        explicit "not enabled" refusal rather than silently doing nothing.
+        """
+        vehicle_id = profile.get("vehicle_id", "UNKNOWN")
+        if self.search_client is None:
+            return {
+                "vehicle_id": vehicle_id,
+                "in_scope": False,
+                "answer": "",
+                "refusal_reason": "Web research is not enabled for this session.",
+            }
+
+        prompt = build_research_prompt(profile, question)
+
+        last_error = "unknown error"
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                raw_text = self.search_client.generate(prompt)
+                return _validate_and_normalize_research(raw_text, vehicle_id)
+            except DecisionParseError as e:
+                last_error = str(e)
+            except Exception as e:  # network/API errors — retry the same way
+                last_error = f"API error: {e}"
+
+            if attempt < MAX_ATTEMPTS:
+                time.sleep(self.retry_backoff_seconds)
+
+        return _fallback_research(vehicle_id, last_error)
 
 
 if __name__ == "__main__":

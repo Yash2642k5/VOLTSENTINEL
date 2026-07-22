@@ -17,13 +17,16 @@ ET AI Hackathon 2026 — Problem Statement 3: _AI for Industrial EV Supply Chain
 5. [System Architecture](#system-architecture)
 6. [Data Flow](#data-flow)
 7. [Agent Decision Layer](#agent-decision-layer)
-8. [Anomaly & Health Detection Logic](#anomaly--health-detection-logic)
-9. [Data Simulation Approach](#data-simulation-approach)
-10. [Alignment with Judging Criteria](#alignment-with-judging-criteria)
-11. [Expected Deliverables](#expected-deliverables)
-12. [Future Roadmap](#future-roadmap)
-13. [Team](#team)
-14. [Conclusion](#conclusion)
+8. [Security Enforcement — Quarantine Circuit Breaker](#security-enforcement--quarantine-circuit-breaker)
+9. [Fleet BI Chat](#fleet-bi-chat)
+10. [Anomaly & Health Detection Logic](#anomaly--health-detection-logic)
+11. [Data Simulation Approach](#data-simulation-approach)
+12. [Configuration](#configuration)
+13. [Alignment with Judging Criteria](#alignment-with-judging-criteria)
+14. [Expected Deliverables](#expected-deliverables)
+15. [Future Roadmap](#future-roadmap)
+16. [Team](#team)
+17. [Conclusion](#conclusion)
 
 ---
 
@@ -124,14 +127,19 @@ flowchart TB
         I["Perceive → Reason → Decide → Act<br/>agent/decision_engine.py"]
     end
 
-    subgraph ACTIONS["Mocked Agent Actions (agent/actions.py)"]
-        J1["create_maintenance_ticket()"]
-        J2["recommend_charge_policy()"]
-        J3["escalate_incident()"]
-        J4["notify_fleet_manager()"]
+    subgraph ACTIONS["Agent Actions — agent/actions.py (mixed maturity, see tiers below)"]
+        J1["create_maintenance_ticket() · Tier 1 (real email)"]
+        J2["recommend_charge_policy() · Tier 2 (mocked)"]
+        J3["escalate_incident() · Tier 2 (mocked)"]
+        J4["notify_fleet_manager() · Tier 1 (real email)"]
+        J5["quarantine_vehicle() · Tier 3 (real enforcement)"]
     end
 
-    K["Streamlit Dashboard<br/>Fleet view · health/thermal/charging charts<br/>Agent recommendations · alert feed · 'Simulate Attack'"]
+    subgraph BICHAT["Fleet BI Chat (agent/bi_chat_engine.py)"]
+        L["Read-only tool-calling loop<br/>+ optional scoped web_search"]
+    end
+
+    K["Streamlit Dashboard<br/>Fleet view · Fleet BI chat · health/thermal/charging charts<br/>Agent recommendations (preview → Execute & log) · alert feed · 'Simulate Attack'"]
 
     A --> B
     A2 --> B
@@ -149,10 +157,15 @@ flowchart TB
     I --> J2
     I --> J3
     I --> J4
+    I --> J5
     J1 --> K
     J2 --> K
     J3 --> K
     J4 --> K
+    J5 --> K
+    J5 -.->|"tightens future unticketed<br/>commands at ingestion"| B
+    C -.-> L
+    L --> K
     D -.-> K
     E -.-> K
     F -.-> K
@@ -164,14 +177,15 @@ flowchart TB
 | Layer                                    | Technology & Role                                                                                                                                                                                                                             |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Data Simulation**                      | Python (numpy, pandas) — generates synthetic battery telemetry (capacity, voltage, temperature, SoC, charge-cycle behaviour) for the fleet and injects both normal maintenance events and unauthorized-command "attack" events.               |
-| **Ingestion**                            | FastAPI (REST / WebSocket) — receives and normalizes incoming telemetry and command events; the boundary where real BLE-connected BMS hardware would plug in.                                                                                 |
-| **Storage**                              | SQLite — stores telemetry history, mock maintenance ticket records, and the command event log.                                                                                                                                                |
+| **Ingestion**                            | FastAPI (REST / WebSocket) — receives and normalizes incoming telemetry and command events; the boundary where real BLE-connected BMS hardware would plug in. Also the enforcement point for the quarantine circuit breaker (below): an unticketed command for a currently-quarantined vehicle is rejected outright here, not merely flagged after the fact.                 |
+| **Storage**                              | SQLite — stores telemetry history, mock maintenance ticket records, the command event log, agent action audit trail, and quarantine / rejected-command state.                                                                                |
 | **Predictive Analytics**                 | scikit-learn (regression) — fits a capacity-fade curve per asset and extrapolates Remaining Useful Life (RUL).                                                                                                                                 |
 | **Charging Behaviour Analytics** _[NEW]_ | Analyzes charge-cycle patterns per asset — fast-charge frequency, depth-of-discharge habits, charge-rate stress — as an input to both RUL and the agent's charge-policy recommendations.                                                      |
 | **Thermal Event Detection** _[NEW]_      | Flags overheating and abnormal thermal trends from telemetry as a distinct health-anomaly signal, separate from command/security anomalies.                                                                                                   |
 | **Security Analytics**                   | Rule-based logic, optionally supplemented with scikit-learn IsolationForest — scores each command against maintenance-ticket match, GPS consistency, and command frequency.                                                                   |
-| **Agent Decision Layer** _[NEW]_         | Perceive → reason → decide → act loop over the merged RUL + thermal + charging + security profile per asset. Emits predictive maintenance triggers, charge-discharge recommendations, and security escalations (mocked actions for the demo). |
-| **Presentation**                         | Streamlit — unified fleet dashboard with per-asset health charts, charge/thermal indicators, agent recommendations, a live alert feed, and a "Simulate Attack" trigger for demonstration.                                                     |
+| **Agent Decision Layer** _[NEW]_         | Perceive → reason → decide → act loop over the merged RUL + thermal + charging + security profile per asset. Emits predictive maintenance triggers, charge-discharge recommendations, security escalations, and (new) real quarantine enforcement — see Action Maturity Tiers below. Every proposed action is previewed before a human explicitly commits it. |
+| **Fleet BI Chat** _[NEW]_                | A read-only, tool-calling chat surface (`agent/bi_chat_engine.py`) — the fleet manager asks plain-English comparison/ranking/trend questions and gets back a short answer plus a chart built dynamically from whatever the agent's own tool calls returned. Optional scoped `web_search` tool, off by default. Has zero access to `agent/actions.py`'s write path. |
+| **Presentation**                         | Streamlit — unified fleet dashboard: Fleet Overview, Fleet BI chat, Asset Detail, Agent (live reasoning + history), and Alert Feed tabs, plus a live "Simulate Attack" trigger for demonstration.                                             |
 
 ---
 
@@ -193,7 +207,11 @@ sequenceDiagram
 
     Sim->>API: Telemetry event (capacity, voltage, temp, SoC)
     Sim->>API: BMS command event (e.g. discharge cut-off)
-    API->>DB: Normalize & persist event
+    alt Vehicle is quarantined AND command has no maintenance ticket
+        API->>DB: Reject command outright, log to rejected_commands
+    else Not quarantined, or command is ticketed
+        API->>DB: Normalize & persist event
+    end
 
     DB->>RUL: Capacity/voltage history
     DB->>Chg: Charge-cycle history
@@ -208,10 +226,14 @@ sequenceDiagram
     Note over Agent: Perceive → Reason → Decide → Act
 
     Agent->>Agent: Weigh signals jointly
-    Agent->>UI: create_maintenance_ticket() [if RUL/thermal threshold crossed]
-    Agent->>UI: recommend_charge_policy() [if charging stress detected]
-    Agent->>UI: escalate_incident() [if unticketed + GPS mismatch/freq spike]
-    Agent->>UI: notify_fleet_manager() [if severity above threshold]
+    Agent->>UI: Propose actions (preview only — nothing written yet)
+    UI->>UI: Fleet manager reviews the preview
+    UI->>Agent: "Execute & log" clicked (or "Discard")
+    Agent->>DB: create_maintenance_ticket() [if RUL/thermal threshold crossed] — real email if SMTP configured
+    Agent->>DB: recommend_charge_policy() [if charging stress detected] — still mocked (Tier 2)
+    Agent->>DB: escalate_incident() [if unticketed + GPS mismatch/freq spike]
+    Agent->>DB: quarantine_vehicle() [if security severity=high, repeated/escalating pattern] — real enforcement (Tier 3)
+    Agent->>DB: notify_fleet_manager() [if severity above threshold] — real email if SMTP configured
 
     UI-->>UI: Render per-asset health, charts, alerts, recommendations
 ```
@@ -222,6 +244,8 @@ sequenceDiagram
 
 This is the component that makes VoltSentinel an **agent** rather than a scoring dashboard, and it is the direct answer to the APM Agent brief's call for predictive maintenance triggers and charge-discharge recommendations, not just RUL numbers.
 
+**Human-in-the-loop by design:** clicking "Run agent reasoning" for an asset only *previews* the LLM's proposed actions — nothing is written yet. The fleet manager reviews the rationale for each proposed action and must explicitly click **"Execute & log"** to commit them (or "Discard" to drop the preview). This preview-vs-commit pattern is deliberate: it means the agent's own written LLM call (`agent/decision_engine.py`) is never itself the thing that touches the database — a human decision always sits between "the model recommended X" and "X actually happened," which matters more now that some actions (below) have real-world effects rather than only being logged.
+
 ### Perceive → Reason → Decide → Act
 
 ```mermaid
@@ -229,9 +253,10 @@ flowchart LR
     P["👁️ PERCEIVE<br/>Read merged risk profile per asset:<br/>RUL trend · thermal-anomaly flags ·<br/>charging-pattern stress · security flags"]
     R["🧠 REASON<br/>Weigh signals together, not independently<br/>e.g. moderate RUL decline + frequent<br/>fast-charging + unticketed disable event<br/>≠ same RUL decline alone"]
     D["⚖️ DECIDE<br/>Determine warranted action(s) & priority<br/>with explicit, auditable rationale<br/>tied to observed signals"]
-    Ac["⚡ ACT<br/>Emit concrete outputs via mocked<br/>action functions — not just a displayed score"]
+    Pv["👤 PREVIEW<br/>Fleet manager reviews proposed<br/>action(s) — nothing written yet"]
+    Ac["⚡ ACT<br/>'Execute & log' commits via<br/>agent/actions.py (mixed real/mocked, see tiers below)"]
 
-    P --> R --> D --> Ac
+    P --> R --> D --> Pv --> Ac
     Ac -.->|feedback loop: next cycle| P
 ```
 
@@ -239,12 +264,75 @@ flowchart LR
 
 | Action                              | Trigger Condition (example)                                                                | Output                                                                                    |
 | ------------------------------------ | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| **Predictive maintenance trigger**  | RUL crosses a defined threshold, or a thermal anomaly persists across cycles               | `create_maintenance_ticket()` — mock ticket with asset ID, reason, priority               |
-| **Charge-discharge recommendation** | Charging-pattern analysis shows high fast-charge frequency or excessive depth-of-discharge  | `recommend_charge_policy()` — e.g. cap charge rate, limit DoD to extend RUL               |
-| **Security escalation**             | Unticketed command + GPS mismatch and/or frequency spike                                    | `escalate_incident()` — flags for fleet-manager review, distinct from routine maintenance |
-| **Fleet manager notification**      | Any high-priority decision above a severity threshold                                       | `notify_fleet_manager()` — mocked notification for demo purposes                          |
+| **Predictive maintenance trigger**  | RUL crosses a defined threshold, or a thermal anomaly persists across cycles               | `create_maintenance_ticket()` — logs the ticket and sends a real email if SMTP is configured |
+| **Charge-discharge recommendation** | Charging-pattern analysis shows high fast-charge frequency or excessive depth-of-discharge  | `recommend_charge_policy()` — e.g. cap charge rate, limit DoD to extend RUL (still mocked)  |
+| **Security escalation**             | Unticketed command + GPS mismatch and/or frequency spike                                    | `escalate_incident()` — flags for fleet-manager review, distinct from routine maintenance (still mocked) |
+| **Vehicle quarantine** _[NEW]_       | Security severity = high **and** a repeated/escalating pattern (not a single isolated event) | `quarantine_vehicle()` — **real enforcement**: every further unticketed BMS command for that asset is rejected outright at ingestion from this point on. Never disables or cuts off a moving vehicle directly — it only tightens which future unauthenticated commands are honored. |
+| **Fleet manager notification**      | Any high-priority decision above a severity threshold                                       | `notify_fleet_manager()` — logs the notification and sends a real email if SMTP is configured |
 
-For the hackathon build, these actions are mocked functions (`agent/actions.py`) rather than live integrations — sufficient to demonstrate agentic behaviour end-to-end without requiring external systems.
+### Action Maturity Tiers
+
+Not every action carries the same real-world weight, so `agent/actions.py` groups them explicitly:
+
+| Tier | Actions | Behaviour |
+| ---- | ------- | --------- |
+| **Tier 1 — fully automated, no physical/financial risk** | `create_maintenance_ticket`, `notify_fleet_manager` | Sends a real email via SMTP when `SMTP_HOST` + `ALERT_EMAIL_TO` are configured (see [Configuration](#configuration)). Degrades gracefully to logged-only if SMTP isn't set up — nothing breaks for a demo/dev environment. |
+| **Tier 2 — mocked, human-approval gated** | `recommend_charge_policy`, `escalate_incident` | Logged only. Deliberately kept mocked: changing actual charge behaviour (a real OCPP/BMS write) or escalating to an on-call system should stay behind an explicit human "Approve" step before ever wiring to a live integration. |
+| **Tier 3 — real enforcement (the circuit breaker)** | `quarantine_vehicle` | **Not mocked.** Flips `vehicle_quarantine.active` for the vehicle; enforced at the ingestion boundary (see [Security Enforcement](#security-enforcement--quarantine-circuit-breaker)). The LLM can impose a quarantine but can never lift one — `release_vehicle_quarantine` is deliberately absent from both `agent/prompts.py`'s action vocabulary and `agent/actions.py`'s dispatcher, reachable only from a dashboard control that requires an explicit human name for the audit trail. |
+
+Every decision — including an explicit `no_action` when nothing is warranted — is logged to the `agent_actions` audit table, so the fleet view can always show "the agent reviewed this asset and found X," not just silence.
+
+### Scoped Per-Asset Research (optional)
+
+A separate, narrow web-search capability sits on the Agent tab, distinct from the main decision loop and from the Fleet BI chat below:
+
+- The main Perceive→Reason→Decide loop (`decide_for_asset` / `decide_for_fleet`) stays completely network-free — every emitted action always traces back only to an already-computed `risk_engine.py` signal, never to something pulled from the open web.
+- `DecisionEngine.research_asset_question()` is a **separate** client (`GeminiSearchClient`), reachable only through this one method, and disabled by default (`enable_research=False`). It answers one free-text question about **one specific asset's already-computed profile**, and only within a fixed, narrow topic allowlist: replacement vehicle/battery-pack models suited to that asset's profile, charge-policy best practices tied to signals already present, manufacturer/part-sourcing context tied to a logged maintenance trigger, or regulatory/safety context tied to a logged security escalation.
+- Anything outside that list — general knowledge, unrelated topics, requests to act on other systems — the model is instructed to explicitly refuse (`in_scope: false` with a `refusal_reason`), and the engine trusts and passes that refusal straight through rather than second-guessing it.
+
+---
+
+## Security Enforcement — Quarantine Circuit Breaker
+
+Detection (flagging a suspicious command) and enforcement (actually changing what a vehicle will accept) are kept as two separate, explicit steps — matching the same detect-vs-decide separation used throughout the codebase. This section covers the enforcement half, introduced alongside the agent's Tier 3 `quarantine_vehicle` action above.
+
+```mermaid
+flowchart TB
+    Q1["Agent decides quarantine_vehicle<br/>is warranted (repeated/escalating<br/>security pattern) → human clicks<br/>'Execute & log'"]
+    Q2[("vehicle_quarantine table<br/>active = 1, reason, action_id,<br/>quarantined_at")]
+    Q3{"Next incoming BMS command<br/>for this vehicle"}
+    Q4["Has a matching<br/>maintenance ticket?"]
+    Q5["✅ Accepted into `commands`<br/>(a real technician visit<br/>always still goes through)"]
+    Q6["❌ Rejected outright<br/>logged to `rejected_commands`<br/>(never even reaches `commands`)"]
+    Q7["👤 Human-only release<br/>(dashboard button, requires a name)<br/>release_vehicle_quarantine()"]
+
+    Q1 --> Q2
+    Q2 --> Q3
+    Q3 --> Q4
+    Q4 -->|Yes| Q5
+    Q4 -->|No, and vehicle quarantined| Q6
+    Q2 -.-> Q7
+    Q7 -.->|active = 0| Q2
+```
+
+Key properties:
+
+- **Real enforcement, not another log line.** `ingestion/db.py`'s `insert_command` / `insert_command_batch` check `vehicle_quarantine.active` on every incoming command; an unticketed command for a quarantined vehicle is rejected at the ingestion boundary itself and recorded in a dedicated `rejected_commands` audit table — it never lands in the `commands` table the analytics layers read from.
+- **A ticketed command always still goes through**, quarantine or not — this is what keeps a real technician visit from being blocked by the same circuit breaker meant to stop unauthorized remote control.
+- **Never touches a moving vehicle directly.** Quarantine doesn't issue a discharge-cutoff or disable command itself — the exact mechanism the "Tirri Challenge" exploited. It only tightens which *future* unauthenticated commands are honored, deliberately avoiding recreating that same failure mode (a remote party autonomously affecting a moving vehicle) in the other direction.
+- **Asymmetric by design.** The LLM can impose a quarantine (`quarantine_vehicle` is a valid action the model can choose), but it can never lift one. `release_vehicle_quarantine` is intentionally absent from both `agent/prompts.py`'s action vocabulary and `agent/actions.py`'s dispatch table — the only legitimate caller in the codebase is a dashboard control that already requires an explicit human click and a name, recorded for the audit trail (`released_by`).
+
+---
+
+## Fleet BI Chat
+
+Alongside the per-asset Agent tab, the dashboard has a second, fleet-wide conversational surface: **"ask the fleet in plain English."**
+
+- A few always-on default charts (fleet risk mix, RUL distribution, charge-stress vs. thermal scatter) sit above a chat box wired to `agent/bi_chat_engine.py`'s tool-calling loop.
+- The fleet manager can ask comparison, ranking, or trend questions in plain English (e.g. *"compare EVR-0001 and EVR-0007's charging stress"* or *"which vehicles are lowest on RUL?"*) and get back a short text answer plus — for comparative/trend questions — a chart. The chart type and fields come from the model's own dynamic chart spec, not a fixed chart per query type.
+- **Strictly read-only.** This engine has zero access to `agent/actions.py`'s write path — by construction, not just by prompt instruction — so a question asked here can never accidentally trigger a maintenance ticket, a quarantine, or any other side effect. The Agent tab's write path is a deliberately separate engine and tool registry.
+- **Optional web search.** A `web_search` tool (backed by a separate Gemini client with Google Search grounding) can be opted into per session, for questions the fleet database genuinely can't answer (e.g. *"what EV models should replace EVR-0012?"*). It's off by default (`enable_web_search=False`); the model is instructed to always prefer the fleet-data tools first and only fall back to the web when a question truly needs outside information.
+- Conversation history is threaded per session, so follow-up questions like *"what about EVR-0002 too?"* work, while every turn still re-queries live data rather than a stale snapshot from when the conversation started.
 
 ---
 
@@ -300,6 +388,22 @@ flowchart LR
     Demo -.-> Attack
     Merge --> API["→ FastAPI Ingestion"]
 ```
+
+---
+
+## Configuration
+
+VoltSentinel runs fully with no configuration at all (every real integration below degrades gracefully to its original mocked/logged-only behaviour if unset) — these environment variables opt into live behaviour on top of that baseline.
+
+| Variable | Required for | Notes |
+| -------- | ------------ | ----- |
+| `GEMINI_API_KEY` | Agent decision loop, Fleet BI chat, per-asset research | Without it, `agent_recommendations.py` and `bi_chat.py` both show an explicit "set this to enable" message rather than crashing — default charts and history views still work. |
+| `SMTP_HOST` + `ALERT_EMAIL_TO` | Tier 1 real email (`create_maintenance_ticket`, `notify_fleet_manager`) | Both must be set for email to actually send. If either is missing, these actions fall back to the original logged-only behaviour — no error, no partial send. |
+| `SMTP_PORT` | Tier 1 real email (optional) | Defaults to `587`. |
+| `SMTP_USER` / `SMTP_PASSWORD` | Tier 1 real email (optional) | Only needed if your SMTP server requires authentication. |
+| `SMTP_FROM` | Tier 1 real email (optional) | Defaults to `SMTP_USER`, or `voltsentinel@localhost` if that's also unset. |
+
+Scoped per-asset research (`enable_research=True`) and the Fleet BI chat's web-search tool (`enable_web_search=True`) are both additionally **opt-in at the call site**, on top of `GEMINI_API_KEY` being set — neither reaches the open web unless a caller explicitly requests it.
 
 ---
 

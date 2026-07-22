@@ -305,10 +305,9 @@ def inject_custom_css() -> None:
 # Header
 # ----------------------------------------------------------------------
 def render_header() -> None:
-    st.title("\U0001F50B VoltSentinel")
+    st.title("\U0001F50B Welcome Fleet Manager (id: 1234)")
     st.caption(
-        "AI-Powered EV Battery Asset Performance & Security Intelligence Agent — "
-        "ET AI Hackathon 2026, Problem Statement 3 (EV Asset Performance Management Agent)"
+        "AI-Powered EV Battery Asset Performance & Security Intelligence Agent — VOLTSENTINEL"
     )
     st.markdown(f"<hr style='margin-top:0.4rem;margin-bottom:1.2rem;border-color:{DARK_BORDER};'>",
                 unsafe_allow_html=True)

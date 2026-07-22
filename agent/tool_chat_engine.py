@@ -31,6 +31,26 @@ model again. The loop ends when the model emits final_answer, or when
 max_tool_turns is hit — at which point we force one last turn asking
 the model to answer with whatever it already has, rather than looping
 forever or silently truncating.
+
+Quota / rate-limit handling (free-tier Gemini):
+  - Each tool turn can itself trigger a SECOND network call (e.g.
+    agent/bi_tools.py's web_search tool calls a separate
+    GeminiSearchClient), so one user question can cost several
+    generate_content() calls against the same per-minute quota bucket.
+  - decision_engine.GeminiClient/GeminiSearchClient.generate() now raise
+    QuotaExceededError (not a generic Exception) on a 429, with
+    request_options={"retry": None} disabling the SDK's own internal
+    retry-with-backoff so that error surfaces immediately instead of
+    silently retrying for minutes underneath a single call.
+  - This loop treats QuotaExceededError as terminal for the whole
+    conversation turn: it does not retry the same turn, and it does not
+    continue to a further tool turn (which would just hit the same
+    exhausted quota bucket again) — it returns a clear, immediate
+    "rate limited, try again in ~Ns" result instead.
+  - MAX_TOOL_TURNS and MAX_PARSE_ATTEMPTS are both kept low (rather than
+    generous) specifically because the free tier's quota is only 5
+    requests/minute/model — every additional turn or retry is a real cost
+    against that budget, not just a latency cost.
 """
 
 from __future__ import annotations
@@ -40,9 +60,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from .decision_engine import _attempt_json_repair, _strip_code_fence
+from .decision_engine import QuotaExceededError, _attempt_json_repair, _strip_code_fence
 
-MAX_TOOL_TURNS = 6
+MAX_TOOL_TURNS = 3
+# Lowered from 6 -> 3: each tool turn is at least one generate_content()
+# call (sometimes two, if the tool itself calls another Gemini client, as
+# web_search does) against a 5-requests/minute free-tier quota. 3 turns
+# covers "call a fleet-data tool, call web_search, give a final answer" —
+# the common case — without letting one question realistically burn
+# through most of a minute's entire budget by itself.
 MAX_PARSE_ATTEMPTS = 2
 RETRY_BACKOFF_SECONDS = 1.0
 
@@ -98,6 +124,19 @@ def _execute_tool(tools: Dict[str, Tool], name: Any, arguments: Optional[Dict[st
         return {"error": f"tool '{name}' failed: {e}"}
 
 
+def _quota_error_result(error: QuotaExceededError) -> Dict[str, Any]:
+    """Shared "rate limited" result shape, used whether the quota error
+    came from the loop's own client.generate() call or bubbled up from
+    inside a tool (e.g. web_search's internal GeminiSearchClient call)."""
+    delay = error.retry_delay_seconds
+    wait_hint = f" Please try again in about {int(delay)}s." if delay else " Please wait a bit and try again."
+    return {
+        "text": f"I've hit the API's rate limit for this minute.{wait_hint}",
+        "chart": None,
+        "error": "quota_exceeded",
+    }
+
+
 def run_tool_loop(
     client,
     tools: Dict[str, Tool],
@@ -117,9 +156,9 @@ def run_tool_loop(
     function only adds the tool catalogue and the running transcript.
 
     Returns whatever dict the model supplied under "final_answer". Never
-    raises: if every parse attempt fails, or the tool-turn budget is
-    exhausted, returns a graceful {"text": ..., "error": ...}-shaped
-    fallback instead."""
+    raises: if every parse attempt fails, the tool-turn budget is
+    exhausted, or the API quota is exhausted, returns a graceful
+    {"text": ..., "chart": None, "error": ...}-shaped fallback instead."""
     preamble = "Available tools:\n" + (build_tools_block(tools) or "(none)")
 
     tool_calls_made = 0
@@ -138,10 +177,20 @@ def run_tool_loop(
         prompt = preamble + "\n\n" + "\n\n".join(transcript) + suffix
 
         parsed = None
+        quota_error: Optional[QuotaExceededError] = None
         for attempt in range(MAX_PARSE_ATTEMPTS):
             try:
                 raw = client.generate(prompt)
                 parsed = _parse_turn(raw)
+                break
+            except QuotaExceededError as e:
+                # Fail fast: a per-minute quota error will not resolve
+                # itself within this turn's short retry window, and every
+                # further parse attempt or tool turn shares the same
+                # exhausted quota bucket. Stop retrying immediately rather
+                # than burning the rest of the attempt budget on calls
+                # that cannot succeed sooner.
+                quota_error = e
                 break
             except ToolLoopError as e:
                 last_error = str(e)
@@ -149,6 +198,9 @@ def run_tool_loop(
                 last_error = f"API error: {e}"
             if attempt < MAX_PARSE_ATTEMPTS - 1:
                 time.sleep(retry_backoff_seconds)
+
+        if quota_error is not None:
+            return _quota_error_result(quota_error)
 
         if parsed is None:
             return {"text": f"I couldn't complete that request ({last_error}).",
@@ -168,6 +220,27 @@ def run_tool_loop(
         arguments = call.get("arguments") or {}
         result = _execute_tool(tools, name, arguments)
         tool_calls_made += 1
+
+        # A tool itself may hit the same quota wall (e.g. agent/bi_tools.py's
+        # web_search tool calls a separate GeminiSearchClient internally,
+        # catches the failure, and returns it as {"error": "..."} rather
+        # than raising — see build_bi_tools()). Detect that shape here too,
+        # so a quota-exhausted tool call stops the whole loop immediately
+        # instead of feeding the model an error string and burning another
+        # turn asking it to "try again", which would just hit quota again.
+        if (
+            isinstance(result, dict)
+            and isinstance(result.get("error"), str)
+            and ("429" in result["error"] or "quota" in result["error"].lower())
+        ):
+            return {
+                "text": (
+                    "I've hit the API's rate limit for this minute while trying to look "
+                    f"that up ({result['error']}). Please try again shortly."
+                ),
+                "chart": None,
+                "error": "quota_exceeded",
+            }
 
         transcript.append(f"Assistant called tool: {name}({json.dumps(arguments, default=str)})")
         transcript.append(f"Tool result for {name}: {json.dumps(result, default=str)}")

@@ -14,12 +14,23 @@ spec), not a fixed chart per query.
 Same split as every other dashboard/components/*.py file:
     - build_*_chart(...)      -- pure, alt.Chart-returning, no st.*.
     - build_chart_from_spec() -- same, but for the agent's dynamic spec
-      instead of a fixed dataset.
+    instead of a fixed dataset.
     - render_bi_chat(...)     -- the only function here touching st.*.
 
 Read-only by design: this tab has no access to agent/actions.py's write
 path (see agent/bi_chat_engine.py's docstring) — it can tell the fleet
 manager what it found, never change anything in the fleet.
+
+Web search: enabled via BIChatEngine.create(enable_web_search=True) below,
+so the agent's `web_search` tool (agent/bi_tools.py) is actually registered
+for this session. Without that flag, BIChatEngine.create() defaults to
+enable_web_search=False, search_client stays None, and build_bi_tools()
+never registers `web_search` at all — the model simply never sees it as
+an available tool, regardless of the system prompt. Note this uses a
+SEPARATE Gemini call path (GeminiSearchClient, with Google Search
+grounding registered as a tool) from the main chat client, so it's an
+additional cost surface, not free — and depends on your GEMINI_API_KEY's
+plan supporting search grounding.
 """
 
 from __future__ import annotations
@@ -47,9 +58,16 @@ def get_bi_chat_engine():
     if not os.environ.get("GEMINI_API_KEY"):
         return None
     try:
-        return BIChatEngine.create()
-    except Exception:
-        return None
+        # enable_web_search=True: registers agent/bi_tools.py's `web_search`
+        # tool (backed by a separate GeminiSearchClient with Google Search
+        # grounding) so the BI chat agent can actually reach the open web
+        # for questions the fleet database can't answer (e.g. "what EV
+        # models should replace EVR-0012"). See BI_SYSTEM_PROMPT in
+        # agent/prompts.py for how the model is instructed to prefer
+        # fleet-data tools first and only fall back to web_search when needed.
+        return BIChatEngine.create(enable_web_search=True)
+    except Exception as e:
+        st.error(str(e)); return None
 
 
 # ----------------------------------------------------------------------
@@ -99,7 +117,7 @@ def build_stress_vs_thermal_chart(profile_df: pd.DataFrame) -> alt.Chart:
             color=alt.Color(
                 "overall_risk_level:N", title="Risk",
                 scale=alt.Scale(domain=list(RISK_LEVEL_ORDER),
-                                 range=[RISK_LEVEL_COLORS[l] for l in RISK_LEVEL_ORDER]),
+                                range=[RISK_LEVEL_COLORS[l] for l in RISK_LEVEL_ORDER]),
             ),
             tooltip=["vehicle_id", "charge_stress_score", "thermal_anomaly_count", "overall_risk_level"],
         )

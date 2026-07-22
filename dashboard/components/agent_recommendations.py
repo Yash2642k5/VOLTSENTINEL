@@ -3,8 +3,14 @@ dashboard/components/agent_recommendations.py
 
 Per-asset panel showing the agent decision layer's output for whichever
 vehicle is currently selected — distinct from alert_feed.py's fleet-wide
-ticker. Two sections:
+ticker. Sections:
 
+  0. Quarantine banner: if this asset is currently quarantined (Tier 3
+     circuit breaker, agent/actions.py's quarantine_vehicle), shows why
+     and offers a human-only release control. This is the ONLY place in
+     the dashboard that can call release_vehicle_quarantine — deliberately
+     requires a typed name before the button enables, since that name is
+     what lands in the audit trail (agent_actions.parameters.released_by).
   1. Live reasoning: a "Run agent reasoning" button that calls
      agent/decision_engine.py's Perceive->Reason->Decide loop for this
      one asset, previews the resulting actions, and only writes them to
@@ -28,7 +34,7 @@ from typing import Any, Dict, Optional
 
 import streamlit as st
 
-from agent.actions import execute_decision
+from agent.actions import execute_decision, release_vehicle_quarantine
 from agent.decision_engine import DecisionEngine
 from dashboard.components.alert_feed import render_alert_card
 from dashboard.utils import clear_all_caches, get_vehicle_actions
@@ -70,6 +76,40 @@ def decision_action_to_row(vehicle_id: str, action: Dict[str, Any], status: str)
 
 
 # ----------------------------------------------------------------------
+# Quarantine banner + human-only release control (Tier 3)
+# ----------------------------------------------------------------------
+def render_quarantine_controls(conn, vehicle_id: str) -> None:
+    """No-ops entirely if the vehicle isn't currently quarantined — this
+    banner should only ever appear when agent/actions.py's
+    quarantine_vehicle has actually fired for this asset."""
+    from ingestion.db import get_quarantine_status
+
+    status = get_quarantine_status(conn, vehicle_id)
+    if not status or not status["active"]:
+        return
+
+    st.error(
+        f"🔒 **{vehicle_id} is quarantined.** Any further unticketed BMS command for this "
+        f"vehicle is being rejected outright at ingestion. Reason: {status['reason']}",
+        icon="🔒",
+    )
+
+    col1, col2 = st.columns([3, 1])
+    released_by = col1.text_input(
+        "Your name (recorded in the audit log as who released this)",
+        key=f"release_by__{vehicle_id}",
+    )
+    if col2.button(
+        "Release quarantine", key=f"release_quarantine__{vehicle_id}",
+        type="primary", disabled=not released_by.strip(),
+    ):
+        release_vehicle_quarantine(conn, vehicle_id, released_by=released_by.strip())
+        clear_all_caches()
+        st.success(f"Quarantine released for {vehicle_id} by {released_by.strip()}.")
+        st.rerun()
+
+
+# ----------------------------------------------------------------------
 # Live reasoning section
 # ----------------------------------------------------------------------
 def render_live_decision_section(conn, vehicle_id: str, profile_row: Dict[str, Any]) -> None:
@@ -94,6 +134,12 @@ def render_live_decision_section(conn, vehicle_id: str, profile_row: Dict[str, A
     st.markdown(f"**Assessment:** {decision.get('summary', '')}")
     for action in decision["actions"]:
         render_alert_card(decision_action_to_row(vehicle_id, action, status="pending — not yet logged"))
+        if action["action_type"] == "quarantine_vehicle":
+            st.caption(
+                "⚠️ This action will lock out further unticketed BMS commands for this "
+                "vehicle immediately upon execution — it does not affect a moving vehicle "
+                "directly, but it does change what the vehicle will accept going forward."
+            )
 
     col1, col2 = st.columns([1, 3])
     if col1.button("Execute & log these actions", key=f"execute_agent__{vehicle_id}", type="primary"):
@@ -128,6 +174,8 @@ def render_agent_recommendations(conn, vehicle_id: str, profile_row: Optional[Di
     if profile_row is None:
         st.warning(f"No risk profile available for {vehicle_id} yet.")
         return
+
+    render_quarantine_controls(conn, vehicle_id)
 
     st.subheader("Agent Reasoning")
     render_live_decision_section(conn, vehicle_id, profile_row)

@@ -43,12 +43,33 @@ Web search / research addition:
     refuse anything outside a fixed topic list (see agent/prompts.py).
     Disabled by default — DecisionEngine.create() only builds a
     search_client when enable_research=True is passed explicitly.
+
+Quota / rate-limit handling (free-tier Gemini):
+  - The free tier caps generate_content at a small requests-per-minute
+    quota per model. Two things used to make a 429 here far worse than it
+    needed to be:
+      1. google-generativeai's underlying transport has its own automatic
+         retry-with-backoff for transient errors, which can silently retry
+         for minutes UNDER a single generate_content() call before ever
+         raising back to this file. request_options={"retry": None} below
+         disables that, so a 429 surfaces immediately.
+      2. This file's own retry loops (decide_for_asset,
+         research_asset_question) used to retry a 429 with the same fixed
+         backoff as a parse error — pointless, since retrying against an
+         already-exhausted per-minute quota within the same minute just
+         burns the remaining retry budget without succeeding sooner.
+    QuotaExceededError below is a distinct exception type so callers (this
+    file's retry loops, and agent/tool_chat_engine.py's run_tool_loop) can
+    detect a 429 specifically and fail fast — one clear message, using the
+    server's own suggested retry_delay when available — instead of
+    retrying blindly or hanging for minutes.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -77,14 +98,14 @@ DEFAULT_MODEL_NAME = "gemini-3.5-flash"
 # this 429s with "limit: 0" for your specific key, confirm the exact free-
 # tier model name in your AI Studio project page and swap it in here.
 DEFAULT_TEMPERATURE = 0.2
-MAX_ATTEMPTS = 3  # 1 initial call + 2 retries on a parse/validation failure
-# Bumped from 2 -> 3: response_mime_type="application/json" is best-effort
-# JSON mode, not a hard schema guarantee -- Gemini occasionally embeds a raw
-# unescaped quote or newline inside a string value (most often when a
-# rationale quotes a coordinate or phrase), which breaks the parser mid-
-# string. _attempt_json_repair() below fixes the most common shapes of that
-# before giving up, but a third attempt costs little and catches whatever
-# repair can't.
+MAX_ATTEMPTS = 2  # 1 initial call + 1 retry on a parse/validation failure.
+# Lowered from 3 -> 2 while on the free tier (5 requests/minute/model):
+# every retry is a fresh generate_content() call against the same quota
+# bucket, and a QuotaExceededError now skips remaining retries entirely
+# (see decide_for_asset below) rather than consuming this budget anyway.
+# json_repair-based recovery (_attempt_json_repair below) still handles
+# the most common "almost valid JSON" failures without needing a second
+# network round trip at all.
 
 
 class DecisionParseError(Exception):
@@ -92,6 +113,56 @@ class DecisionParseError(Exception):
     valid decision object. Always caught inside decide_for_asset — never
     escapes to the caller, since a single asset's failure shouldn't kill
     a fleet run."""
+
+
+class QuotaExceededError(Exception):
+    """Raised when the underlying Gemini call fails with a 429 (rate/quota
+    exceeded) — kept distinct from a generic API/network error so callers
+    can fail fast instead of retrying with the same backoff a transient
+    error would get. Retrying a per-minute quota error within the same
+    minute cannot succeed sooner; it only burns the retry budget and, if
+    the SDK's own internal retry is also active, can silently stall for
+    minutes before ever raising. See module docstring."""
+
+    def __init__(self, message: str, retry_delay_seconds: Optional[float] = None):
+        super().__init__(message)
+        self.retry_delay_seconds = retry_delay_seconds
+
+
+# Disables google-generativeai's own internal transport-level retry/backoff
+# for a single generate_content() call, so a 429 raises immediately instead
+# of being silently retried (with exponential backoff) inside the SDK for
+# up to several minutes before ever reaching our code. We do our own,
+# explicit, fail-fast handling instead (see QuotaExceededError above).
+_NO_SDK_RETRY_REQUEST_OPTIONS = {"retry": None}
+
+
+def _extract_retry_delay_seconds(error: Exception) -> Optional[float]:
+    """Best-effort extraction of the server-suggested retry delay (seconds)
+    from a 429/ResourceExhausted error. The google-api-core exception's
+    structured fields for this vary across SDK versions, so this falls
+    back to a regex over str(error) — the free-tier 429 body has
+    consistently included a `retry_delay { seconds: N }` block in testing.
+    Returns None if no delay could be determined; callers must handle that."""
+    match = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", str(error))
+    if match:
+        return float(match.group(1))
+    # Fall back to any bare "seconds: N" in case the wrapping changes.
+    match = re.search(r"seconds:\s*(\d+)", str(error))
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _is_quota_error(error: Exception) -> bool:
+    """Detects a 429/quota-exceeded error without a hard dependency on a
+    specific google-api-core exception class (import paths for
+    ResourceExhausted have moved across SDK versions). Checking both the
+    class name and message text keeps this robust to that churn."""
+    if type(error).__name__ in ("ResourceExhausted", "TooManyRequests"):
+        return True
+    text = str(error)
+    return "429" in text or "quota" in text.lower() or "RESOURCE_EXHAUSTED" in text
 
 
 # ----------------------------------------------------------------------
@@ -137,8 +208,16 @@ class GeminiClient:
         )
 
     def generate(self, user_prompt: str) -> str:
-        response = self._model.generate_content(user_prompt)
-        return response.text
+        try:
+            response = self._model.generate_content(
+                user_prompt,
+                request_options=_NO_SDK_RETRY_REQUEST_OPTIONS,
+            )
+            return response.text
+        except Exception as e:
+            if _is_quota_error(e):
+                raise QuotaExceededError(str(e), retry_delay_seconds=_extract_retry_delay_seconds(e)) from e
+            raise
 
 
 # ----------------------------------------------------------------------
@@ -173,6 +252,13 @@ class GeminiSearchClient:
             )
         genai.configure(api_key=resolved_key)
 
+        # "google_search_retrieval" is the SDK's built-in search-grounding
+        # tool shorthand. A raw dict like {"google_search": {}} is NOT a
+        # recognized shorthand -- the SDK instead tries to parse it as a
+        # custom FunctionDeclaration and raises "Unknown field for
+        # FunctionDeclaration: google_search". If this still fails on your
+        # installed google-generativeai version, check that package's
+        # current docs for the exact grounding-tool name it expects.
         self._model = genai.GenerativeModel(
             model_name=model_name,
             system_instruction=system_instruction,
@@ -180,12 +266,20 @@ class GeminiSearchClient:
                 temperature=temperature,
                 response_mime_type="application/json",
             ),
-            tools=[{"google_search": {}}],
+            tools="google_search_retrieval",
         )
 
     def generate(self, user_prompt: str) -> str:
-        response = self._model.generate_content(user_prompt)
-        return response.text
+        try:
+            response = self._model.generate_content(
+                user_prompt,
+                request_options=_NO_SDK_RETRY_REQUEST_OPTIONS,
+            )
+            return response.text
+        except Exception as e:
+            if _is_quota_error(e):
+                raise QuotaExceededError(str(e), retry_delay_seconds=_extract_retry_delay_seconds(e)) from e
+            raise
 
 
 # ----------------------------------------------------------------------
@@ -414,6 +508,16 @@ class DecisionEngine:
                 return _validate_and_normalize(raw_text, vehicle_id)
             except DecisionParseError as e:
                 last_error = str(e)
+            except QuotaExceededError as e:
+                # A per-minute quota error will not resolve itself within
+                # this function's short retry window, and retrying
+                # immediately just burns the rest of the attempt budget for
+                # no benefit. Fail fast with the server's own suggested
+                # wait time (when available) instead of looping.
+                delay = e.retry_delay_seconds
+                hint = f", retry in ~{int(delay)}s" if delay else ""
+                last_error = f"quota exceeded{hint} ({e})"
+                break
             except Exception as e:  # network/API errors — retry the same way
                 last_error = f"API error: {e}"
 
@@ -495,6 +599,12 @@ class DecisionEngine:
                 return _validate_and_normalize_research(raw_text, vehicle_id)
             except DecisionParseError as e:
                 last_error = str(e)
+            except QuotaExceededError as e:
+                # Same fail-fast reasoning as decide_for_asset above.
+                delay = e.retry_delay_seconds
+                hint = f", retry in ~{int(delay)}s" if delay else ""
+                last_error = f"quota exceeded{hint} ({e})"
+                break
             except Exception as e:  # network/API errors — retry the same way
                 last_error = f"API error: {e}"
 

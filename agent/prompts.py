@@ -15,7 +15,7 @@ between prompt text and action-handling code.
 
 Design choices, tied directly to the project doc:
   - The system prompt encodes the Perceive -> Reason -> Decide -> Act
-    framing from §6.1 and the four action types + mocked functions
+    framing from §6.1 and the action types + mocked/real functions
     from §6.2's table, so the model's output vocabulary matches
     agent/actions.py exactly.
   - The per-asset prompt passes the ALREADY-COMPUTED signals from
@@ -28,6 +28,17 @@ Design choices, tied directly to the project doc:
   - A worked few-shot example is included so the model's rationale
     style stays consistent and auditable across assets, rather than
     varying with each call.
+
+quarantine_vehicle (added alongside Tier 1/3 real actions in
+agent/actions.py) is included in ACTION_TYPES so the model can impose
+it — but its release counterpart, release_vehicle_quarantine, is
+deliberately NEVER added here. The model must never be given the
+vocabulary to lift a quarantine itself; only a human, from the
+dashboard, can do that. Keeping this asymmetry enforced at the prompt
+level (not just in actions.py's dispatcher) means even a prompt-
+injection-style attempt to get the model to "output" a release action
+still can't produce a valid action_type — _validate_and_normalize in
+decision_engine.py rejects anything outside ACTION_TYPES outright.
 """
 
 from __future__ import annotations
@@ -36,14 +47,17 @@ from typing import Any, Dict, Optional
 
 
 # ----------------------------------------------------------------------
-# Action vocabulary — must match agent/actions.py's mocked functions exactly
+# Action vocabulary — must match agent/actions.py's ACTION_DISPATCH keys
+# exactly. release_vehicle_quarantine is intentionally absent: it is a
+# human-only action, never emittable by the model.
 # ----------------------------------------------------------------------
 ACTION_TYPES = (
-    "maintenance_trigger",        # -> create_maintenance_ticket()
-    "charge_policy_recommendation",  # -> recommend_charge_policy()
-    "security_escalation",        # -> escalate_incident()
-    "fleet_manager_notification", # -> notify_fleet_manager()
-    "no_action",                  # explicit "nothing warranted" — never omit silently
+    "maintenance_trigger",            # -> create_maintenance_ticket()
+    "charge_policy_recommendation",   # -> recommend_charge_policy()
+    "security_escalation",            # -> escalate_incident()
+    "fleet_manager_notification",     # -> notify_fleet_manager()
+    "quarantine_vehicle",             # -> quarantine_vehicle() — real enforcement, see below
+    "no_action",                      # explicit "nothing warranted" — never omit silently
 )
 
 PRIORITY_LEVELS = ("low", "medium", "high", "critical")
@@ -72,11 +86,22 @@ trend is increasing.
 mismatch OR a frequency spike) — i.e. security severity is medium or high. This is \
 distinct from routine maintenance and must be flagged for fleet-manager review, not \
 folded into a maintenance ticket.
-      * fleet_manager_notification — warranted for any decision above priority "medium".
+      * quarantine_vehicle — a REAL enforcement action, not a flag for review: the \
+moment this fires, every further unticketed BMS command for this asset is rejected \
+outright at ingestion, not merely logged. Reserve this for security severity=high with \
+a REPEATED or escalating pattern — e.g. multiple unticketed commands, or a \
+frequency-spike burst — not a single isolated event, since it changes what the vehicle \
+will accept going forward. It never disables, cuts off, or otherwise directly controls \
+a moving vehicle; it only tightens which future unauthenticated commands are honored. \
+You cannot lift this yourself once imposed — only a human fleet manager can release a \
+quarantined vehicle, so only choose this when the pattern genuinely warrants ongoing \
+enforcement, not just a one-time alert (use security_escalation for that instead).
+      * fleet_manager_notification — warranted for any decision above priority "medium", \
+and always alongside quarantine_vehicle so a human knows enforcement was just imposed.
       * no_action — use this explicitly if, after reasoning over all signals together, \
 nothing is currently warranted. Never simply omit output when there is nothing to do.
   - Act: your output IS the action list. You do not execute the actions yourself — a \
-separate mocked function layer (agent/actions.py) does that from your output.
+separate action-handling layer (agent/actions.py) does that from your output.
 
 Every action MUST include a short, specific rationale tied to the actual signal values \
 you were given (explainable and auditable) — never a generic statement like "asset needs \
@@ -93,7 +118,7 @@ rationale, never a bare unescaped "), and never leave a trailing comma before a 
   "actions": [
     {
       "action_type": "<one of: maintenance_trigger | charge_policy_recommendation | \
-security_escalation | fleet_manager_notification | no_action>",
+security_escalation | quarantine_vehicle | fleet_manager_notification | no_action>",
       "priority": "<one of: low | medium | high | critical>",
       "rationale": "<specific, signal-grounded explanation, 1-3 sentences>",
       "parameters": { "<action-specific key-value pairs, e.g. reason, cap_charge_rate>" }

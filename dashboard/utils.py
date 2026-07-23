@@ -30,6 +30,14 @@ their status_plain_label() / security_plain_label() lookup helpers) exist
 specifically for a non-technical fleet-manager audience, alongside the
 existing technical labels (status_label(), etc.) which some components
 still use for badges/logs.
+
+Driver identity / vehicle assignment (Future Roadmap Feature 1):
+get_drivers() and get_current_drivers_by_vehicle() below are additive —
+every existing query here still keys purely on vehicle_id. A vehicle
+with no assignment history yet (e.g. a DB seeded before this feature
+existed) is simply absent from get_current_drivers_by_vehicle()'s
+result, matching get_latest_vehicle_locations()'s existing "absent, not
+a placeholder" convention for vehicles with no command history.
 """
 
 from __future__ import annotations
@@ -189,6 +197,37 @@ def get_recent_actions(_conn: sqlite3.Connection, exclude_no_action: bool = True
 
 
 # ----------------------------------------------------------------------
+# Cached queries — drivers / vehicle assignments (Future Roadmap Feature 1)
+# ----------------------------------------------------------------------
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_drivers(_conn: sqlite3.Connection) -> pd.DataFrame:
+    """The full driver pool, independent of any vehicle assignment —
+    backs a future driver picker/roster view."""
+    from ingestion.db import get_all_drivers
+
+    rows = get_all_drivers(_conn)
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_current_drivers_by_vehicle(_conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    """{vehicle_id: {driver_id, name, license_id, depot_home, shift_start,
+    shift_end}} for every vehicle that has assignment history — vehicles
+    with none yet are simply absent, not padded with a placeholder driver.
+    Iterates per-vehicle rather than a single join query, matching the
+    same per-vehicle query pattern get_latest_vehicle_locations() below
+    and ingestion/db.py's other per-vehicle helpers already use."""
+    from ingestion.db import get_all_vehicle_ids, get_current_driver_for_vehicle
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for vid in get_all_vehicle_ids(_conn):
+        driver = get_current_driver_for_vehicle(_conn, vid)
+        if driver is not None:
+            result[vid] = driver
+    return result
+
+
+# ----------------------------------------------------------------------
 # Cached queries — per-vehicle (health_chart.py, fleet_map.py, etc.)
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
@@ -212,6 +251,17 @@ def get_vehicle_tickets(_conn: sqlite3.Connection, vehicle_id: str) -> pd.DataFr
     from ingestion.db import get_tickets_for_vehicle
 
     rows = get_tickets_for_vehicle(_conn, vehicle_id)
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_vehicle_assignments(_conn: sqlite3.Connection, vehicle_id: str) -> pd.DataFrame:
+    """Full shift-assignment history for one vehicle, oldest first — backs
+    a future per-asset "assignment history" panel alongside the existing
+    health/thermal/charging tabs in health_chart.py."""
+    from ingestion.db import get_assignments_for_vehicle
+
+    rows = get_assignments_for_vehicle(_conn, vehicle_id)
     return pd.DataFrame([dict(r) for r in rows])
 
 

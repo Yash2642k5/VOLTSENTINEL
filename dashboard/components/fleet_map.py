@@ -26,6 +26,16 @@ after an attack is injected, so the map automatically zooms to the
 affected vehicle instead of requiring the manager to find it manually.
 The same session key is used to highlight that vehicle's row in the
 fleet table in red, so it's visually unmistakable in both places.
+
+Driver column (Future Roadmap Feature 1): build_fleet_table_view()
+takes an optional driver_by_vehicle lookup (dashboard/utils.py's
+get_current_drivers_by_vehicle()) and surfaces the vehicle's current
+driver's name as a plain "Driver" column, right after "Vehicle" — no
+new dashboard tab or picker yet, since the roadmap's own proposed shape
+for this feature is exactly "a Driver column in the sortable fleet
+view." A vehicle with no assignment history yet (e.g. an older seeded
+DB) shows "Unassigned" rather than blank/None, matching this file's
+existing "always show something explainable, never a bare null" style.
 """
 
 from __future__ import annotations
@@ -45,6 +55,7 @@ from dashboard.utils import (
     format_count,
     format_cycles,
     format_pct,
+    get_current_drivers_by_vehicle,
     get_fleet_profile,
     get_latest_vehicle_locations,
     get_vehicle_ids,
@@ -59,6 +70,8 @@ DEPOT_MARKER_COLOR = [66, 66, 66, 200]       # dark gray, for depot reference po
 DEPOT_LABELS = ("Bengaluru Depot", "Delhi Depot", "Mumbai Depot")  # order matches DEFAULT_DEPOT_LOCATIONS
 
 ATTACKED_ROW_STYLE = "background-color: #4A1420; color: #FF8A80; font-weight: 700;"
+
+UNASSIGNED_DRIVER_LABEL = "Unassigned"
 
 
 def _hex_to_rgba(hex_color: str, alpha: int = 200) -> List[int]:
@@ -96,14 +109,25 @@ def render_fleet_summary_metrics(profile_df: pd.DataFrame) -> None:
 # ----------------------------------------------------------------------
 # Sortable asset table + selection
 # ----------------------------------------------------------------------
-def build_fleet_table_view(profile_df: pd.DataFrame) -> pd.DataFrame:
+def build_fleet_table_view(
+    profile_df: pd.DataFrame,
+    driver_by_vehicle: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> pd.DataFrame:
     """Pure transform: picks/renames/formats the columns worth showing
     in the fleet table, in a fixed risk-descending sort so the assets
     that most need attention are always at the top. Column labels are
     plain-English on purpose — this table is what a non-technical fleet
-    manager looks at first."""
+    manager looks at first.
+
+    driver_by_vehicle: optional {vehicle_id: {"name": ..., ...}} lookup
+    (dashboard/utils.get_current_drivers_by_vehicle()) — when omitted,
+    every row's "Driver" column reads "Unassigned" rather than the
+    column being dropped entirely, so callers/tests that don't pass it
+    still get a stable, predictable shape."""
     if profile_df.empty:
         return profile_df
+
+    driver_by_vehicle = driver_by_vehicle or {}
 
     rank = {level: i for i, level in enumerate(RISK_LEVEL_ORDER)}
     df = profile_df.copy()
@@ -112,6 +136,9 @@ def build_fleet_table_view(profile_df: pd.DataFrame) -> pd.DataFrame:
 
     view = pd.DataFrame({
         "Vehicle": df["vehicle_id"],
+        "Driver": df["vehicle_id"].map(
+            lambda vid: driver_by_vehicle.get(vid, {}).get("name") or UNASSIGNED_DRIVER_LABEL
+        ),
         "Risk": df["overall_risk_level"].map(risk_level_label),
         "Battery Status": df["status"].map(status_plain_label),
         "Est. Time Left": df["rul_cycles"].map(lambda v: format_cycles(v)),
@@ -133,7 +160,10 @@ def _style_attacked_row(row: pd.Series, attacked_vehicle_id: Optional[str]) -> L
     return [""] * len(row)
 
 
-def render_fleet_table(profile_df: pd.DataFrame) -> Optional[str]:
+def render_fleet_table(
+    profile_df: pd.DataFrame,
+    driver_by_vehicle: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Optional[str]:
     """Renders the table and a vehicle picker below it. Returns the
     selected vehicle_id (or None if the fleet is empty) — app.py uses
     this to decide which asset's detail views to render."""
@@ -141,7 +171,7 @@ def render_fleet_table(profile_df: pd.DataFrame) -> Optional[str]:
         st.info("No vehicles in the fleet profile yet.")
         return None
 
-    view = build_fleet_table_view(profile_df)
+    view = build_fleet_table_view(profile_df, driver_by_vehicle=driver_by_vehicle)
 
     # attack_trigger.py sets this the moment a live attack is injected —
     # reused here (same key fleet_map.py's map view already reads) so the
@@ -278,11 +308,12 @@ def render_fleet_overview(conn) -> Tuple[pd.DataFrame, Optional[str]]:
     reuse the already-fetched profile for the detail views below
     instead of re-querying it."""
     profile_df = get_fleet_profile(conn)
+    driver_by_vehicle = get_current_drivers_by_vehicle(conn)
 
     render_fleet_summary_metrics(profile_df)
     st.markdown("#### 🗺️ Fleet Map")
     render_fleet_map(conn, profile_df)
     st.markdown("#### 📋 Fleet Assets")
-    selected_vehicle_id = render_fleet_table(profile_df)
+    selected_vehicle_id = render_fleet_table(profile_df, driver_by_vehicle=driver_by_vehicle)
 
     return profile_df, selected_vehicle_id

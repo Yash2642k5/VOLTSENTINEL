@@ -3,12 +3,13 @@ simulator/config.py
 
 Single source of truth for every parameter the simulator uses:
 fleet size, cycle count, battery decay behaviour, thermal thresholds,
-charging-pattern behaviour, maintenance ticket generation, and
-Tirri Challenge-style attack injection.
+charging-pattern behaviour, maintenance ticket generation, Tirri
+Challenge-style attack injection, and driver identity / vehicle
+assignment (Future Roadmap Feature 1).
 
 Everything else in simulator/ (telemetry_generator, maintenance_generator,
-attack_injector) reads from SimulatorConfig — no magic numbers should
-live anywhere else in the simulator package.
+attack_injector, driver_generator) reads from SimulatorConfig — no magic
+numbers should live anywhere else in the simulator package.
 """
 
 from dataclasses import dataclass, field
@@ -117,6 +118,29 @@ class SimulatorConfig:
 
     command_types: Tuple[str, ...] = ("discharge_cutoff", "disable", "enable")
     attack_command_types: Tuple[str, ...] = ("discharge_cutoff", "disable")
+
+    # ------------------------------------------------------------------
+    # Driver identity / vehicle assignment (Future Roadmap Feature 1)
+    #
+    # num_drivers is deliberately independent of fleet_size: in a real
+    # fleet, drivers rotate across vehicles/shifts rather than owning one
+    # vehicle each, so the pool is usually smaller than the fleet. Names
+    # are a representative Indian first/last-name sample, matching the
+    # India-representative ambient/depot assumptions already made
+    # elsewhere in this config (ambient_temp_mean_c, depot_locations).
+    # ------------------------------------------------------------------
+    num_drivers: int = 20                                   # size of the driver pool
+    driver_shifts_per_vehicle: Tuple[int, int] = (2, 5)      # (min, max) shift-assignment records per vehicle
+    license_id_prefix: str = "DL"
+    driver_first_names: Tuple[str, ...] = (
+        "Aarav", "Vihaan", "Aditya", "Vivaan", "Arjun", "Sai", "Reyansh", "Ayaan",
+        "Krishna", "Ishaan", "Priya", "Ananya", "Diya", "Saanvi", "Aadhya", "Myra",
+        "Anika", "Kavya", "Riya", "Ira",
+    )
+    driver_last_names: Tuple[str, ...] = (
+        "Sharma", "Verma", "Gupta", "Kumar", "Singh", "Yadav", "Reddy", "Nair",
+        "Iyer", "Patel", "Mehta", "Joshi", "Rao", "Das", "Chatterjee",
+    )
 
     # ------------------------------------------------------------------
     # Output paths (relative to project root)

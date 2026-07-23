@@ -12,6 +12,8 @@ Tables:
     commands             <- CommandEvent  (ticket_id FK -> maintenance_tickets)
     vehicle_quarantine   <- circuit-breaker state per vehicle (Tier 3 agent action)
     rejected_commands    <- audit trail of commands rejected due to quarantine
+    drivers              <- Driver (Future Roadmap Feature 1)
+    vehicle_assignments  <- VehicleAssignment (Feature 1; driver_id FK -> drivers)
 
 Inserts use INSERT OR IGNORE against natural unique keys, so re-running
 ingestion on the same simulator output (e.g. during dev/demo rehearsal)
@@ -23,6 +25,12 @@ that vehicle that has no matching maintenance ticket — real enforcement at
 the ingestion boundary, not just a detection flag applied after the fact.
 A ticketed command (a real technician visit) always still goes through,
 quarantine or not.
+
+Driver identity / vehicle assignment (Feature 1): purely additive on top
+of the above — nothing here changes how telemetry/commands/tickets are
+stored or enforced. drivers/vehicle_assignments exist so a "who was
+driving this vehicle, and when" dimension can be looked up alongside the
+existing vehicle-only signals, not to replace them.
 """
 
 from __future__ import annotations
@@ -32,7 +40,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional
 
-from .schemas import CommandEvent, MaintenanceTicket, TelemetryReading
+from .schemas import CommandEvent, Driver, MaintenanceTicket, TelemetryReading, VehicleAssignment
 
 DB_PATH = os.path.join("data", "voltsentinel.db")
 
@@ -132,6 +140,29 @@ CREATE TABLE IF NOT EXISTS rejected_commands (
 );
 """
 
+# ----------------------------------------------------------------------
+# Driver identity / vehicle assignment schema (Future Roadmap Feature 1)
+# ----------------------------------------------------------------------
+_CREATE_DRIVERS = """
+CREATE TABLE IF NOT EXISTS drivers (
+    driver_id       TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    license_id      TEXT NOT NULL,
+    depot_home      TEXT NOT NULL
+);
+"""
+
+_CREATE_VEHICLE_ASSIGNMENTS = """
+CREATE TABLE IF NOT EXISTS vehicle_assignments (
+    assignment_id   TEXT PRIMARY KEY,
+    vehicle_id      TEXT NOT NULL,
+    driver_id       TEXT NOT NULL,
+    shift_start     TEXT NOT NULL,
+    shift_end       TEXT,
+    FOREIGN KEY (driver_id) REFERENCES drivers(driver_id)
+);
+"""
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_telemetry_vehicle ON telemetry(vehicle_id);",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_timestamp ON telemetry(timestamp);",
@@ -139,6 +170,9 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_commands_vehicle ON commands(vehicle_id);",
     "CREATE INDEX IF NOT EXISTS idx_commands_timestamp ON commands(timestamp);",
     "CREATE INDEX IF NOT EXISTS idx_rejected_commands_vehicle ON rejected_commands(vehicle_id);",
+    "CREATE INDEX IF NOT EXISTS idx_assignments_vehicle ON vehicle_assignments(vehicle_id);",
+    "CREATE INDEX IF NOT EXISTS idx_assignments_driver ON vehicle_assignments(driver_id);",
+    "CREATE INDEX IF NOT EXISTS idx_assignments_shift_start ON vehicle_assignments(shift_start);",
 ]
 
 
@@ -148,6 +182,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_COMMANDS)
     conn.execute(_CREATE_QUARANTINE)
     conn.execute(_CREATE_REJECTED_COMMANDS)
+    conn.execute(_CREATE_DRIVERS)
+    conn.execute(_CREATE_VEHICLE_ASSIGNMENTS)
     for stmt in _CREATE_INDEXES:
         conn.execute(stmt)
     conn.commit()
@@ -379,6 +415,135 @@ def get_rejected_commands(conn: sqlite3.Connection, vehicle_id: Optional[str] = 
 
 
 # ----------------------------------------------------------------------
+# Insert helpers — drivers & vehicle assignments (Future Roadmap Feature 1)
+#
+# Same INSERT OR IGNORE idempotency pattern as everything above: a driver
+# pool is generated/inserted once per seed run, and re-running seeding
+# against an already-populated DB must not raise or duplicate rows.
+# ----------------------------------------------------------------------
+def insert_driver(conn: sqlite3.Connection, driver: Driver) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO drivers (driver_id, name, license_id, depot_home)
+            VALUES (?, ?, ?, ?)""",
+        (driver.driver_id, driver.name, driver.license_id, driver.depot_home),
+    )
+
+
+def insert_driver_batch(conn: sqlite3.Connection, drivers: Iterable[Driver]) -> int:
+    rows = [(d.driver_id, d.name, d.license_id, d.depot_home) for d in drivers]
+    before = conn.total_changes
+    conn.executemany(
+        """INSERT OR IGNORE INTO drivers (driver_id, name, license_id, depot_home)
+            VALUES (?, ?, ?, ?)""",
+        rows,
+    )
+    conn.commit()
+    return conn.total_changes - before
+
+
+def insert_vehicle_assignment(conn: sqlite3.Connection, assignment: VehicleAssignment) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO vehicle_assignments
+            (assignment_id, vehicle_id, driver_id, shift_start, shift_end)
+            VALUES (?, ?, ?, ?, ?)""",
+        (
+            assignment.assignment_id, assignment.vehicle_id, assignment.driver_id,
+            _ts(assignment.shift_start),
+            None if assignment.shift_end is None else _ts(assignment.shift_end),
+        ),
+    )
+
+
+def insert_vehicle_assignment_batch(
+    conn: sqlite3.Connection, assignments: Iterable[VehicleAssignment]
+) -> int:
+    rows = [
+        (
+            a.assignment_id, a.vehicle_id, a.driver_id, _ts(a.shift_start),
+            None if a.shift_end is None else _ts(a.shift_end),
+        )
+        for a in assignments
+    ]
+    before = conn.total_changes
+    conn.executemany(
+        """INSERT OR IGNORE INTO vehicle_assignments
+            (assignment_id, vehicle_id, driver_id, shift_start, shift_end)
+            VALUES (?, ?, ?, ?, ?)""",
+        rows,
+    )
+    conn.commit()
+    return conn.total_changes - before
+
+
+# ----------------------------------------------------------------------
+# Query helpers — drivers & vehicle assignments
+# ----------------------------------------------------------------------
+def get_all_drivers(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    return conn.execute("SELECT * FROM drivers ORDER BY driver_id").fetchall()
+
+
+def get_driver(conn: sqlite3.Connection, driver_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM drivers WHERE driver_id = ?", (driver_id,)
+    ).fetchone()
+
+
+def get_assignments_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) -> List[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM vehicle_assignments WHERE vehicle_id = ? ORDER BY shift_start",
+        (vehicle_id,),
+    ).fetchall()
+
+
+def get_assignments_for_driver(conn: sqlite3.Connection, driver_id: str) -> List[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM vehicle_assignments WHERE driver_id = ? ORDER BY shift_start",
+        (driver_id,),
+    ).fetchall()
+
+
+def get_current_assignment_for_vehicle(
+    conn: sqlite3.Connection, vehicle_id: str
+) -> Optional[sqlite3.Row]:
+    """'Current' = the most recent assignment by shift_start. This is the
+    right definition for simulator-generated historical assignment
+    windows (there's no live wall-clock shift happening 'right now' in a
+    batch-seeded demo DB). A live deployment would instead want to filter
+    on shift_end IS NULL / shift_start <= now <= shift_end — that
+    refinement naturally belongs alongside Feature 2 (Live SoC / range
+    tile), once "now" is a meaningful concept for this dashboard at all."""
+    return conn.execute(
+        """SELECT * FROM vehicle_assignments WHERE vehicle_id = ?
+            ORDER BY shift_start DESC LIMIT 1""",
+        (vehicle_id,),
+    ).fetchone()
+
+
+def get_current_driver_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) -> Optional[dict]:
+    """Joins the vehicle's most recent assignment with drivers into a
+    plain, already-flattened dict — convenient for dashboard/utils.py's
+    cached queries, which can't return a raw sqlite3.Row across a
+    st.cache_data boundary as easily as a plain dict. Returns None if the
+    vehicle has no assignment history yet (e.g. seeded before Feature 1
+    existed) rather than fabricating a placeholder driver."""
+    assignment = get_current_assignment_for_vehicle(conn, vehicle_id)
+    if assignment is None:
+        return None
+    driver = get_driver(conn, assignment["driver_id"])
+    if driver is None:
+        return None
+    return {
+        "vehicle_id": vehicle_id,
+        "driver_id": driver["driver_id"],
+        "name": driver["name"],
+        "license_id": driver["license_id"],
+        "depot_home": driver["depot_home"],
+        "shift_start": assignment["shift_start"],
+        "shift_end": assignment["shift_end"],
+    }
+
+
+# ----------------------------------------------------------------------
 # Query helpers — consumed by models/ (Phase 3) and dashboard/ (Phase 5)
 # ----------------------------------------------------------------------
 def get_all_vehicle_ids(conn: sqlite3.Connection) -> List[str]:
@@ -422,6 +587,8 @@ def row_counts(conn: sqlite3.Connection) -> dict:
         "telemetry": conn.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0],
         "maintenance_tickets": conn.execute("SELECT COUNT(*) FROM maintenance_tickets").fetchone()[0],
         "commands": conn.execute("SELECT COUNT(*) FROM commands").fetchone()[0],
+        "drivers": conn.execute("SELECT COUNT(*) FROM drivers").fetchone()[0],
+        "vehicle_assignments": conn.execute("SELECT COUNT(*) FROM vehicle_assignments").fetchone()[0],
     }
 
 
@@ -432,6 +599,7 @@ if __name__ == "__main__":
     from simulator.telemetry_generator import TelemetryGenerator
     from simulator.maintenance_generator import MaintenanceGenerator
     from simulator.attack_injector import AttackInjector
+    from simulator.driver_generator import DriverGenerator
 
     cfg = SimulatorConfig(fleet_size=5, num_cycles=20, random_seed=123)
     tgen = TelemetryGenerator(cfg)
@@ -444,6 +612,10 @@ if __name__ == "__main__":
     ainj = AttackInjector(cfg)
     commands_df = ainj.generate_command_stream(bounds, tickets_df)
 
+    dgen = DriverGenerator(cfg)
+    driver_pool = dgen.get_driver_pool()
+    assignments_df = dgen.generate_fleet_assignments(bounds)
+
     readings = [TelemetryReading(**row) for row in telem_df.to_dict(orient="records")]
     tickets = [MaintenanceTicket(**row) for row in tickets_df.to_dict(orient="records")]
     commands = []
@@ -452,6 +624,8 @@ if __name__ == "__main__":
         if isinstance(row.get("ticket_id"), float) and math.isnan(row["ticket_id"]):
             row["ticket_id"] = None
         commands.append(CommandEvent(**row))
+    drivers = [Driver(**row) for row in driver_pool]
+    assignments = [VehicleAssignment(**row) for row in assignments_df.to_dict(orient="records")]
 
     test_db_path = os.path.join("data", "voltsentinel_test.db")
     if os.path.exists(test_db_path):
@@ -462,8 +636,12 @@ if __name__ == "__main__":
     insert_telemetry_batch(conn, readings)
     insert_maintenance_batch(conn, tickets)
     insert_command_batch(conn, commands)
+    insert_driver_batch(conn, drivers)
+    insert_vehicle_assignment_batch(conn, assignments)
 
     print("Row counts after load:", row_counts(conn))
     print("Vehicles in DB:", get_all_vehicle_ids(conn))
     print("Unticketed commands:", len(get_unticketed_commands(conn)))
+    sample_vid = get_all_vehicle_ids(conn)[0]
+    print(f"Current driver for {sample_vid}:", get_current_driver_for_vehicle(conn, sample_vid))
     conn.close()

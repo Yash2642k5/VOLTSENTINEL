@@ -7,6 +7,11 @@ pipeline. Run this any time the local/deployed DB is empty or wiped
 external-DB migration lands; on Streamlit Community Cloud this file
 will be wiped again on the next reboot/redeploy.
 
+Now also seeds a driver pool and per-vehicle shift assignments
+(Future Roadmap Feature 1) alongside telemetry/tickets/commands, so a
+freshly seeded DB has the "who was driving this vehicle, and when"
+dimension available immediately — no separate migration step needed.
+
 Usage:
     python scripts/seed_db.py
     python scripts/seed_db.py --fleet-size 30 --cycles 300 --seed 42
@@ -21,12 +26,16 @@ import os
 from ingestion.db import (
     get_connection, init_db, insert_telemetry_batch,
     insert_maintenance_batch, insert_command_batch, row_counts,
+    insert_driver_batch, insert_vehicle_assignment_batch,
 )
-from ingestion.schemas import TelemetryReading, MaintenanceTicket, CommandEvent
+from ingestion.schemas import (
+    TelemetryReading, MaintenanceTicket, CommandEvent, Driver, VehicleAssignment,
+)
 from simulator.config import SimulatorConfig
 from simulator.telemetry_generator import TelemetryGenerator
 from simulator.maintenance_generator import MaintenanceGenerator
 from simulator.attack_injector import AttackInjector
+from simulator.driver_generator import DriverGenerator
 
 
 def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe: bool) -> None:
@@ -46,6 +55,10 @@ def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe:
     ainj = AttackInjector(cfg)
     commands_df = ainj.generate_command_stream(bounds, tickets_df)
 
+    dgen = DriverGenerator(cfg)
+    driver_pool = dgen.get_driver_pool()
+    assignments_df = dgen.generate_fleet_assignments(bounds)
+
     readings = [TelemetryReading(**r) for r in telem_df.to_dict(orient="records")]
     tickets = [MaintenanceTicket(**r) for r in tickets_df.to_dict(orient="records")]
     commands = []
@@ -53,6 +66,8 @@ def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe:
         if isinstance(r.get("ticket_id"), float) and math.isnan(r["ticket_id"]):
             r["ticket_id"] = None
         commands.append(CommandEvent(**r))
+    drivers = [Driver(**r) for r in driver_pool]
+    assignments = [VehicleAssignment(**r) for r in assignments_df.to_dict(orient="records")]
 
     conn = get_connection(db_path)
     init_db(conn)
@@ -60,6 +75,8 @@ def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe:
     insert_telemetry_batch(conn, readings)
     insert_maintenance_batch(conn, tickets)
     insert_command_batch(conn, commands)
+    insert_driver_batch(conn, drivers)
+    insert_vehicle_assignment_batch(conn, assignments)
 
     print(f"Seeded {db_path} — {row_counts(conn)}")
     conn.close()

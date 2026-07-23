@@ -87,7 +87,8 @@ from .prompts import (
     build_research_prompt,
 )
 
-DEFAULT_MODEL_NAME = "gemini-3.5-flash"
+DEFAULT_MODEL_NAME = "gemini-3.6-flash"
+DEFAULT_MODEL_NAME_2 = "gemini-3.5-flash"
 # gemini-2.0-flash was deprecated by Google on 2026-03-03 (scheduled
 # shutdown mid-to-late 2026) and its free-tier quota is effectively 0 as
 # a result -- every request fails with 429 "limit: 0" regardless of prompt
@@ -177,7 +178,7 @@ class GeminiClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = DEFAULT_MODEL_NAME,
+        model_name: str = DEFAULT_MODEL_NAME_2,
         temperature: float = DEFAULT_TEMPERATURE,
         system_instruction: str = SYSTEM_PROMPT,
     ):
@@ -190,7 +191,7 @@ class GeminiClient:
         # same class with the BI-chat framing instead of the decision-loop one.
         import google.generativeai as genai
 
-        resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
+        resolved_key = api_key or os.environ.get("GEMINI_API_KEY_2")
         if not resolved_key:
             raise RuntimeError(
                 "No Gemini API key found. Pass api_key= explicitly or set "

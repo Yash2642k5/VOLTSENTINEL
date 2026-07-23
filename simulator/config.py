@@ -4,8 +4,9 @@ simulator/config.py
 Single source of truth for every parameter the simulator uses:
 fleet size, cycle count, battery decay behaviour, thermal thresholds,
 charging-pattern behaviour, maintenance ticket generation, Tirri
-Challenge-style attack injection, and driver identity / vehicle
-assignment (Future Roadmap Feature 1).
+Challenge-style attack injection, driver identity / vehicle assignment
+(Future Roadmap Feature 1), and live SoC/range estimation (Future
+Roadmap Feature 2).
 
 Everything else in simulator/ (telemetry_generator, maintenance_generator,
 attack_injector, driver_generator) reads from SimulatorConfig — no magic
@@ -71,6 +72,20 @@ class SimulatorConfig:
     dod_std_pct: float = 15.0
     high_dod_threshold_pct: float = 85.0       # DoD above this counts as "abusive"
     fleet_fast_charge_baseline_pct: float = 25.0  # fleet-wide baseline used by charging_analyzer
+
+    # ------------------------------------------------------------------
+    # Live SoC / range estimation (Future Roadmap Feature 2)
+    #
+    # No per-cycle distance/odometer field exists anywhere in
+    # telemetry_generator.py's output today, so kwh_per_km is a single,
+    # explicit fleet-wide constant rather than a real per-vehicle
+    # historical figure — see models/range_estimator.py's module
+    # docstring for the full reasoning and the swap-in path once real
+    # distance data exists.
+    # ------------------------------------------------------------------
+    avg_kwh_per_km: float = 0.06            # e-rickshaw-class energy consumption
+    low_range_threshold_km: float = 15.0    # below this = "at risk of stranding"
+    low_soc_threshold_pct: float = 20.0     # belt-and-braces SoC-only check
 
     # ------------------------------------------------------------------
     # Demo guarantee — force one vehicle to show charging-stress behaviour

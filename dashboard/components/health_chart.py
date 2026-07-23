@@ -18,6 +18,17 @@ Split in two layers, deliberately:
 
 Uses Altair (bundled with Streamlit — no extra dependency) rather than
 Plotly, specifically so requirements.txt doesn't grow for this.
+
+Live SoC / range (Future Roadmap Feature 2): render_health_summary_metrics
+now also takes an optional range_row (dashboard/utils.py's
+get_vehicle_range_estimate()) and surfaces a same-day "Live SoC / Range"
+metric plus a stranding-risk warning banner — distinct from the other
+four metrics here, which are all longer-horizon/aggregate signals from
+risk_engine.py's profile. This mirrors fleet_map.py's fleet-wide version
+of the same signal (its "Stranding Risk" tile + red map ring), just
+scoped to the one asset currently open in this tab. Falls back to "—"
+when range_row is omitted, matching every other optional-param pattern
+already used in this file (e.g. profile_row.get(...) throughout).
 """
 
 from __future__ import annotations
@@ -33,8 +44,10 @@ from dashboard.utils import (
     RUL_STATUS_COLORS,
     format_count,
     format_cycles,
+    format_km,
     format_pct,
     format_temperature,
+    get_vehicle_range_estimate,
     get_vehicle_row,
     get_vehicle_telemetry,
     status_label,
@@ -224,7 +237,9 @@ def build_charging_chart(telemetry_df: pd.DataFrame) -> alt.Chart:
 # ----------------------------------------------------------------------
 # Summary metrics row
 # ----------------------------------------------------------------------
-def render_health_summary_metrics(profile_row: Dict[str, Any]) -> None:
+def render_health_summary_metrics(
+    profile_row: Dict[str, Any], range_row: Optional[Dict[str, Any]] = None
+) -> None:
     status = profile_row.get("status", "unknown")
     color = RUL_STATUS_COLORS.get(status, "#757575")
 
@@ -234,11 +249,31 @@ def render_health_summary_metrics(profile_row: Dict[str, Any]) -> None:
         unsafe_allow_html=True,
     )
 
-    cols = st.columns(4)
+    # Live SoC/range is a same-day operational signal, distinct from the
+    # longer-horizon RUL/thermal metrics below — surfaced as a standalone
+    # warning banner (not just a metric tile) when the vehicle is
+    # currently at risk of stranding, so it's impossible to miss even if
+    # the manager only glances at this tab.
+    if range_row and range_row.get("at_risk_of_stranding"):
+        st.warning(
+            f"⚠️ **Low SoC/range** — currently at {format_pct(range_row.get('soc_pct'), decimals=0)} "
+            f"state of charge, an estimated {format_km(range_row.get('estimated_range_km'))} of "
+            f"range remaining.",
+            icon="⚠️",
+        )
+
+    cols = st.columns(5)
     cols[0].metric("Current Capacity", format_pct(profile_row.get("current_capacity_pct")))
     cols[1].metric("Projected RUL", format_cycles(profile_row.get("rul_cycles")))
     cols[2].metric("Thermal Anomalies", format_count(profile_row.get("thermal_anomaly_count"), "anomaly"))
     cols[3].metric("Latest Temp", format_temperature(profile_row.get("latest_temp_c")))
+    cols[4].metric(
+        "Live SoC / Range",
+        (
+            f"{format_pct(range_row.get('soc_pct'), decimals=0)} · "
+            f"{format_km(range_row.get('estimated_range_km'))}"
+        ) if range_row else "—",
+    )
 
 
 # ----------------------------------------------------------------------
@@ -255,7 +290,8 @@ def render_health_chart(conn, vehicle_id: str, profile_df: pd.DataFrame) -> None
         st.warning(f"No telemetry recorded for {vehicle_id} yet.")
         return
 
-    render_health_summary_metrics(row)
+    range_row = get_vehicle_range_estimate(conn, vehicle_id)
+    render_health_summary_metrics(row, range_row=range_row)
 
     tab_rul, tab_thermal, tab_charging = st.tabs(["Capacity & RUL", "Thermal", "Charging Behaviour"])
 

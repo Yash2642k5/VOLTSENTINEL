@@ -38,6 +38,15 @@ with no assignment history yet (e.g. a DB seeded before this feature
 existed) is simply absent from get_current_drivers_by_vehicle()'s
 result, matching get_latest_vehicle_locations()'s existing "absent, not
 a placeholder" convention for vehicles with no command history.
+
+Live SoC / range estimation (Future Roadmap Feature 2):
+get_fleet_range_estimates() and get_vehicle_range_estimate() below are
+also additive, backing dashboard/components/fleet_map.py's stranding-
+risk tile/map-marker and dashboard/components/health_chart.py's
+Asset Detail summary row respectively. Both are thin wrappers around
+models/range_estimator.py — no new detection/estimation logic lives
+here, matching the "compute lives in models/, display lives in
+dashboard/" split noted above.
 """
 
 from __future__ import annotations
@@ -228,6 +237,53 @@ def get_current_drivers_by_vehicle(_conn: sqlite3.Connection) -> Dict[str, Dict[
 
 
 # ----------------------------------------------------------------------
+# Cached queries — live SoC / range estimation (Future Roadmap Feature 2)
+# ----------------------------------------------------------------------
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_fleet_range_estimates(_conn: sqlite3.Connection) -> pd.DataFrame:
+    """Live per-vehicle SoC/range signal, built fresh from each vehicle's
+    LATEST telemetry row only — distinct from get_fleet_profile()'s
+    longer-horizon RUL/thermal/charging/security profile. Kept as its
+    own cached query rather than folded into risk_engine.py, since it
+    answers a same-day operational question ("can this vehicle make it
+    back right now?"), not a degradation one. Backs
+    dashboard/components/fleet_map.py's stranding-risk tile/map-marker/
+    table columns."""
+    from models.range_estimator import RangeEstimator
+    from simulator.config import default_config
+
+    estimator = RangeEstimator(
+        kwh_per_km=default_config.avg_kwh_per_km,
+        low_range_threshold_km=default_config.low_range_threshold_km,
+        low_soc_threshold_pct=default_config.low_soc_threshold_pct,
+    )
+    return estimator.estimate_fleet(_conn)
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_vehicle_range_estimate(_conn: sqlite3.Connection, vehicle_id: str) -> Dict[str, Any]:
+    """Live SoC/range signal for ONE vehicle — backs the Asset Detail
+    tab's summary row (dashboard/components/health_chart.py), alongside
+    get_fleet_range_estimates()'s fleet-wide version used by the Fleet
+    Overview tab. Returns a models.range_estimator.RangeEstimate.to_dict()
+    -shaped dict; every field is None/False if the vehicle has no
+    telemetry yet, matching get_vehicle_row()'s "explainable empty
+    state" convention rather than raising or returning None outright —
+    callers can safely do range_row.get(...) either way."""
+    from ingestion.db import get_telemetry_for_vehicle
+    from models.range_estimator import RangeEstimator
+    from simulator.config import default_config
+
+    rows = get_telemetry_for_vehicle(_conn, vehicle_id)
+    estimator = RangeEstimator(
+        kwh_per_km=default_config.avg_kwh_per_km,
+        low_range_threshold_km=default_config.low_range_threshold_km,
+        low_soc_threshold_pct=default_config.low_soc_threshold_pct,
+    )
+    return estimator.estimate_vehicle(vehicle_id, rows).to_dict()
+
+
+# ----------------------------------------------------------------------
 # Cached queries — per-vehicle (health_chart.py, fleet_map.py, etc.)
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
@@ -360,6 +416,15 @@ def format_cycles(value: Optional[float], placeholder: str = "—") -> str:
     if value is None or pd.isnull(value):
         return placeholder
     return f"{value:,.0f} cycles"
+
+
+def format_km(value: Optional[float], placeholder: str = "—") -> str:
+    """'42.3 km' style formatting for the live range estimate (Future
+    Roadmap Feature 2) — used by both fleet_map.py's table/tile and
+    health_chart.py's Asset Detail summary row."""
+    if value is None or pd.isnull(value):
+        return placeholder
+    return f"{value:,.1f} km"
 
 
 def format_temperature(value: Optional[float], placeholder: str = "—") -> str:

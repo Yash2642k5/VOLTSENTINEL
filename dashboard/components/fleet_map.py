@@ -36,6 +36,19 @@ for this feature is exactly "a Driver column in the sortable fleet
 view." A vehicle with no assignment history yet (e.g. an older seeded
 DB) shows "Unassigned" rather than blank/None, matching this file's
 existing "always show something explainable, never a bare null" style.
+
+Live SoC / range (Future Roadmap Feature 2): build_fleet_table_view()
+also takes an optional range_df (dashboard/utils.py's
+get_fleet_range_estimates()) and surfaces "SoC" / "Est. Range" columns.
+build_vehicle_scatter_data() additionally uses range_df to draw a
+distinct red RING around any vehicle currently at risk of stranding —
+kept as a separate visual channel from the existing risk-level FILL
+color, so a vehicle can be flagged "high risk" and/or "stranding risk"
+without one signal masking the other. render_fleet_summary_metrics()
+adds a fifth "Stranding Risk" tile alongside the existing four. All
+three degrade gracefully (fall back to "—" / no ring / a 0 count) when
+range_df is omitted, matching driver_by_vehicle's existing fallback
+convention.
 """
 
 from __future__ import annotations
@@ -54,9 +67,11 @@ from dashboard.utils import (
     fleet_summary_stats,
     format_count,
     format_cycles,
+    format_km,
     format_pct,
     get_current_drivers_by_vehicle,
     get_fleet_profile,
+    get_fleet_range_estimates,
     get_latest_vehicle_locations,
     get_vehicle_ids,
     risk_level_label,
@@ -73,6 +88,14 @@ ATTACKED_ROW_STYLE = "background-color: #4A1420; color: #FF8A80; font-weight: 70
 
 UNASSIGNED_DRIVER_LABEL = "Unassigned"
 
+# Live SoC / range (Future Roadmap Feature 2) — a distinct ring color/
+# width from the fill color already used for overall_risk_level, so
+# "high risk" and "stranding risk" stay visually independent signals.
+STRANDING_RISK_RING_COLOR = [255, 82, 82, 255]   # bright red ring
+NORMAL_RING_COLOR = [255, 255, 255, 255]
+STRANDING_RISK_LINE_WIDTH = 3
+NORMAL_LINE_WIDTH = 1
+
 
 def _hex_to_rgba(hex_color: str, alpha: int = 200) -> List[int]:
     hex_color = hex_color.lstrip("#")
@@ -83,10 +106,17 @@ def _hex_to_rgba(hex_color: str, alpha: int = 200) -> List[int]:
 # ----------------------------------------------------------------------
 # Summary metrics + risk distribution
 # ----------------------------------------------------------------------
-def render_fleet_summary_metrics(profile_df: pd.DataFrame) -> None:
+def render_fleet_summary_metrics(
+    profile_df: pd.DataFrame, range_df: Optional[pd.DataFrame] = None
+) -> None:
     stats = fleet_summary_stats(profile_df)
+    stranding_risk_count = (
+        int(range_df["at_risk_of_stranding"].sum())
+        if range_df is not None and not range_df.empty
+        else 0
+    )
 
-    cols = st.columns(4)
+    cols = st.columns(5)
     cols[0].metric("Fleet Size", stats["total_vehicles"])
     cols[1].metric("Needs Maintenance", stats["vehicles_needing_maintenance"])
     cols[2].metric("Active Security Signals", stats["vehicles_with_active_security_signal"])
@@ -95,6 +125,7 @@ def render_fleet_summary_metrics(profile_df: pd.DataFrame) -> None:
         format_pct(stats["mean_charge_stress_score"], decimals=0)
         if stats["mean_charge_stress_score"] is not None else "—",
     )
+    cols[4].metric("⚠️ Stranding Risk (low SoC/range)", stranding_risk_count)
 
     badges = " ".join(
         f"<span style='background-color:{RISK_LEVEL_COLORS[level]};color:white;"
@@ -112,6 +143,7 @@ def render_fleet_summary_metrics(profile_df: pd.DataFrame) -> None:
 def build_fleet_table_view(
     profile_df: pd.DataFrame,
     driver_by_vehicle: Optional[Dict[str, Dict[str, Any]]] = None,
+    range_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Pure transform: picks/renames/formats the columns worth showing
     in the fleet table, in a fixed risk-descending sort so the assets
@@ -123,11 +155,20 @@ def build_fleet_table_view(
     (dashboard/utils.get_current_drivers_by_vehicle()) — when omitted,
     every row's "Driver" column reads "Unassigned" rather than the
     column being dropped entirely, so callers/tests that don't pass it
-    still get a stable, predictable shape."""
+    still get a stable, predictable shape.
+
+    range_df: optional output of models.range_estimator.RangeEstimator
+    .estimate_fleet() / dashboard.utils.get_fleet_range_estimates() —
+    when omitted, "SoC" / "Est. Range" read "—" rather than the columns
+    being dropped, matching driver_by_vehicle's fallback convention."""
     if profile_df.empty:
         return profile_df
 
     driver_by_vehicle = driver_by_vehicle or {}
+    range_by_vehicle = (
+        range_df.set_index("vehicle_id").to_dict(orient="index")
+        if range_df is not None and not range_df.empty else {}
+    )
 
     rank = {level: i for i, level in enumerate(RISK_LEVEL_ORDER)}
     df = profile_df.copy()
@@ -142,6 +183,12 @@ def build_fleet_table_view(
         "Risk": df["overall_risk_level"].map(risk_level_label),
         "Battery Status": df["status"].map(status_plain_label),
         "Est. Time Left": df["rul_cycles"].map(lambda v: format_cycles(v)),
+        "SoC": df["vehicle_id"].map(
+            lambda vid: format_pct(range_by_vehicle.get(vid, {}).get("soc_pct"), decimals=0)
+        ),
+        "Est. Range": df["vehicle_id"].map(
+            lambda vid: format_km(range_by_vehicle.get(vid, {}).get("estimated_range_km"))
+        ),
         "Overheating Events": df["thermal_anomaly_count"].map(lambda v: format_count(v, "event")),
         "Security": df["max_security_severity"].map(security_plain_label),
         "Charging Stress": df["charge_stress_score"].map(lambda v: format_pct(v, decimals=0)),
@@ -163,6 +210,7 @@ def _style_attacked_row(row: pd.Series, attacked_vehicle_id: Optional[str]) -> L
 def render_fleet_table(
     profile_df: pd.DataFrame,
     driver_by_vehicle: Optional[Dict[str, Dict[str, Any]]] = None,
+    range_df: Optional[pd.DataFrame] = None,
 ) -> Optional[str]:
     """Renders the table and a vehicle picker below it. Returns the
     selected vehicle_id (or None if the fleet is empty) — app.py uses
@@ -171,7 +219,7 @@ def render_fleet_table(
         st.info("No vehicles in the fleet profile yet.")
         return None
 
-    view = build_fleet_table_view(profile_df, driver_by_vehicle=driver_by_vehicle)
+    view = build_fleet_table_view(profile_df, driver_by_vehicle=driver_by_vehicle, range_df=range_df)
 
     # attack_trigger.py sets this the moment a live attack is injected —
     # reused here (same key fleet_map.py's map view already reads) so the
@@ -192,10 +240,20 @@ def render_fleet_table(
 # ----------------------------------------------------------------------
 # Map
 # ----------------------------------------------------------------------
-def build_vehicle_scatter_data(locations_df: pd.DataFrame, profile_df: pd.DataFrame) -> pd.DataFrame:
-    """Merges last-known location with risk level and computes the RGBA
-    fill color per point — pure data prep, no pydeck/streamlit objects,
-    so this is straightforward to unit test."""
+def build_vehicle_scatter_data(
+    locations_df: pd.DataFrame,
+    profile_df: pd.DataFrame,
+    range_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Merges last-known location with risk level (fill color) and,
+    when range_df is supplied, stranding-risk status (ring color/width)
+    — pure data prep, no pydeck/streamlit objects, so this is
+    straightforward to unit test.
+
+    Fill color still encodes overall_risk_level exactly as before; the
+    ring around each marker is the new, independent stranding-risk
+    channel — a vehicle can show up as e.g. "medium risk fill + red
+    stranding ring" without one signal overwriting the other."""
     if locations_df.empty:
         return locations_df
 
@@ -206,8 +264,30 @@ def build_vehicle_scatter_data(locations_df: pd.DataFrame, profile_df: pd.DataFr
     merged["fill_color"] = merged["overall_risk_level"].map(
         lambda level: _hex_to_rgba(RISK_LEVEL_COLORS.get(level, "#757575"))
     )
+
+    if range_df is not None and not range_df.empty:
+        merged = merged.merge(
+            range_df[["vehicle_id", "estimated_range_km", "soc_pct", "at_risk_of_stranding"]],
+            on="vehicle_id", how="left",
+        )
+        merged["at_risk_of_stranding"] = merged["at_risk_of_stranding"].fillna(False)
+    else:
+        merged["at_risk_of_stranding"] = False
+        merged["estimated_range_km"] = None
+        merged["soc_pct"] = None
+
+    merged["line_color"] = merged["at_risk_of_stranding"].map(
+        lambda at_risk: STRANDING_RISK_RING_COLOR if at_risk else NORMAL_RING_COLOR
+    )
+    merged["line_width"] = merged["at_risk_of_stranding"].map(
+        lambda at_risk: STRANDING_RISK_LINE_WIDTH if at_risk else NORMAL_LINE_WIDTH
+    )
     merged["label"] = merged.apply(
-        lambda r: f"{r['vehicle_id']} — {risk_level_label(r['overall_risk_level'])} risk", axis=1
+        lambda r: (
+            f"{r['vehicle_id']} — {risk_level_label(r['overall_risk_level'])} risk"
+            + (" — ⚠️ LOW RANGE" if r["at_risk_of_stranding"] else "")
+        ),
+        axis=1,
     )
     return merged
 
@@ -237,7 +317,8 @@ def build_vehicle_layer(scatter_df: pd.DataFrame) -> pdk.Layer:
         get_radius=1200,
         pickable=True,
         stroked=True,
-        get_line_color=[255, 255, 255],
+        get_line_color="line_color",
+        get_line_width="line_width",
         line_width_min_pixels=1,
     )
 
@@ -271,12 +352,12 @@ def _initial_view_state(scatter_df: pd.DataFrame) -> pdk.ViewState:
     )
 
 
-def render_fleet_map(conn, profile_df: pd.DataFrame) -> None:
+def render_fleet_map(conn, profile_df: pd.DataFrame, range_df: Optional[pd.DataFrame] = None) -> None:
     locations_df = get_latest_vehicle_locations(conn)
     all_vehicle_ids = get_vehicle_ids(conn)
     missing = len(all_vehicle_ids) - len(locations_df)
 
-    scatter_df = build_vehicle_scatter_data(locations_df, profile_df)
+    scatter_df = build_vehicle_scatter_data(locations_df, profile_df, range_df=range_df)
 
     layers = [build_depot_layer()]
     if not scatter_df.empty:
@@ -293,10 +374,10 @@ def render_fleet_map(conn, profile_df: pd.DataFrame) -> None:
     if missing > 0:
         st.caption(
             f"{format_count(missing, 'vehicle')} not shown — no BMS command history yet "
-            f"(dark gray markers are depot locations)."
+            f"(dark gray markers are depot locations; red ring = low SoC/range)."
         )
     else:
-        st.caption("Dark gray markers are depot locations.")
+        st.caption("Dark gray markers are depot locations. Red ring = low SoC/range.")
 
 
 # ----------------------------------------------------------------------
@@ -309,11 +390,14 @@ def render_fleet_overview(conn) -> Tuple[pd.DataFrame, Optional[str]]:
     instead of re-querying it."""
     profile_df = get_fleet_profile(conn)
     driver_by_vehicle = get_current_drivers_by_vehicle(conn)
+    range_df = get_fleet_range_estimates(conn)
 
-    render_fleet_summary_metrics(profile_df)
+    render_fleet_summary_metrics(profile_df, range_df=range_df)
     st.markdown("#### 🗺️ Fleet Map")
-    render_fleet_map(conn, profile_df)
+    render_fleet_map(conn, profile_df, range_df=range_df)
     st.markdown("#### 📋 Fleet Assets")
-    selected_vehicle_id = render_fleet_table(profile_df, driver_by_vehicle=driver_by_vehicle)
+    selected_vehicle_id = render_fleet_table(
+        profile_df, driver_by_vehicle=driver_by_vehicle, range_df=range_df
+    )
 
     return profile_df, selected_vehicle_id

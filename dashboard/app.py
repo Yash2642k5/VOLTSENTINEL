@@ -34,6 +34,9 @@ Layout:
               (agent_recommendations.py).
     Tab 5   — Alert Feed: fleet-wide reverse-chronological ticker of
               everything the agent has actually logged (alert_feed.py).
+    Tab 6   — Driver Scorecard: charging behaviour re-aggregated by
+              driver_id instead of vehicle_id (Future Roadmap Feature 5,
+              driver_scorecard.py). NEW.
 
 Vehicle selection is threaded through st.session_state["fleet_map_vehicle_select"]
 — the same key fleet_map.py's selectbox already writes to — rather than a
@@ -90,6 +93,7 @@ from dashboard.components.agent_recommendations import render_agent_recommendati
 from dashboard.components.alert_feed import render_alert_feed
 from dashboard.components.attack_trigger import render_attack_trigger
 from dashboard.components.bi_chat import render_bi_chat
+from dashboard.components.driver_scorecard import render_driver_scorecard
 from dashboard.components.fleet_map import render_fleet_overview
 from dashboard.components.health_chart import render_health_chart
 
@@ -382,8 +386,8 @@ def main() -> None:
     conn = get_connection()
     ensure_seeded(conn) 
 
-    tab_fleet, tab_bi, tab_asset, tab_agent, tab_alerts = st.tabs(
-        ["🚗 Fleet Overview", "📊 Fleet BI", "🔋 Asset Detail", "🤖 Agent", "🔔 Alert Feed"]
+    tab_fleet, tab_bi, tab_asset, tab_agent, tab_alerts, tab_drivers = st.tabs(
+        ["🚗 Fleet Overview", "📊 Fleet BI", "🔋 Asset Detail", "🤖 Agent", "🔔 Alert Feed", "🧑‍✈️ Driver Scorecard"]
     )
 
     with tab_fleet:
@@ -416,6 +420,9 @@ def main() -> None:
     with tab_alerts:
         st.subheader("Fleet-Wide Alert Feed")
         render_alert_feed(conn)
+
+    with tab_drivers:
+        render_driver_scorecard(conn)
 
     render_sidebar(conn, default_vehicle_id=selected_vehicle_id)
 

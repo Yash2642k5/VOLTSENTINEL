@@ -278,3 +278,57 @@ def build_batch_summary_prompt(profiles: list[Dict[str, Any]]) -> str:
         "assets (e.g. several vehicles trending toward high DoD), and one clear priority "
         "for today. Do not restate every asset individually — synthesize."
     )
+
+
+# ----------------------------------------------------------------------
+# Future Roadmap Feature 5 — Driver-Level Coaching. A future
+# agent/driver_coaching_engine.py would wire DRIVER_COACHING_SYSTEM_PROMPT
+# as the system message and build_driver_coaching_prompt(profile) as the
+# user message, mirroring how DecisionEngine wires SYSTEM_PROMPT +
+# build_decision_prompt above. Kept separate from ACTION_TYPES/
+# SYSTEM_PROMPT since a coaching note is advisory text handed to a
+# driver, not one of agent/actions.py's dispatched action types.
+# ----------------------------------------------------------------------
+DRIVER_COACHING_SYSTEM_PROMPT = """You are VoltSentinel's driver-coaching assistant \
+(Future Roadmap Feature 5). A charging-behaviour profile has already been computed for \
+one driver — aggregated across every vehicle they were actually assigned to during their \
+own shifts, not a single vehicle's history — and your job is to turn it into a short, \
+specific, signal-grounded coaching note a fleet manager could hand to that driver.
+
+Follow the same explainability standard as the rest of VoltSentinel's agent reasoning: \
+cite the actual numbers you were given (fast-charge frequency vs. fleet baseline, mean \
+depth-of-discharge, stress trend, how many different vehicles they drove), never a vague \
+statement like "this driver needs coaching." If the driver's numbers are in line with or \
+better than the fleet baseline and the stress trend is not increasing, say so plainly \
+instead of inventing a concern.
+
+Respond with ONLY a single JSON object, no prose before or after:
+{
+  "driver_id": "<string, echoed from input>",
+  "needs_coaching": <true|false>,
+  "rationale": "<1-3 sentences, grounded in the actual numbers given>"
+}"""
+
+
+def format_driver_profile(profile: Dict[str, Any]) -> str:
+    """Turns one row of models/charging_analyzer.py's
+    analyze_fleet_drivers() output (as a dict) into a readable text
+    block, mirroring format_asset_profile()'s per-vehicle framing but
+    for a driver aggregated across however many vehicles they drove."""
+    return (
+        f"Driver: {profile.get('driver_id', 'UNKNOWN')}\n"
+        f"Vehicles driven: {_fmt(profile.get('vehicle_count'), '', '0')}, "
+        f"{_fmt(profile.get('total_cycles'), '', '0')} charge cycles observed\n"
+        f"Charging: fast-charge frequency {_fmt(profile.get('fast_charge_frequency_pct'), '%')} "
+        f"(fleet baseline {_fmt(profile.get('fleet_fast_charge_baseline_pct'), '%')}), "
+        f"mean DoD {_fmt(profile.get('mean_dod_pct'), '%')}, "
+        f"stress trend {profile.get('stress_trend', 'unknown')}, "
+        f"charge stress score {_fmt(profile.get('charge_stress_score'))}"
+    )
+
+
+def build_driver_coaching_prompt(profile: Dict[str, Any]) -> str:
+    """The full user-turn prompt for one driver's aggregated charging
+    profile — DRIVER_COACHING_SYSTEM_PROMPT is the system message, this
+    is the user message, mirroring build_decision_prompt's shape."""
+    return f"Input:\n{format_driver_profile(profile)}\n\nOutput:"

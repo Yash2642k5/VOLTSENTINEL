@@ -39,6 +39,12 @@ existed) is simply absent from get_current_drivers_by_vehicle()'s
 result, matching get_latest_vehicle_locations()'s existing "absent, not
 a placeholder" convention for vehicles with no command history.
 
+Driver-level coaching (Future Roadmap Feature 5):
+get_driver_charging_profile() is also additive — a thin cached wrapper
+around models/charging_analyzer.py's analyze_fleet_drivers(), backing
+dashboard/components/driver_scorecard.py, mirroring get_fleet_profile()'s
+pattern for the vehicle-level equivalent.
+
 Live SoC / range estimation (Future Roadmap Feature 2):
 get_fleet_range_estimates() and get_vehicle_range_estimate() below are
 also additive, backing dashboard/components/fleet_map.py's stranding-
@@ -188,6 +194,19 @@ def get_fleet_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
 
     engine = RiskEngine()
     return engine.build_fleet_profile(_conn)
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_driver_charging_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
+    """Backs the Driver Scorecard tab (Future Roadmap Feature 5) --
+    charging behaviour re-aggregated by driver_id instead of vehicle_id.
+    See models/charging_analyzer.py's analyze_fleet_drivers() for the
+    aggregation logic; this is a thin cached wrapper, matching
+    get_fleet_profile()'s pattern for the vehicle-level equivalent."""
+    from models.charging_analyzer import ChargingAnalyzer
+
+    analyzer = ChargingAnalyzer()
+    return analyzer.analyze_fleet_drivers(_conn)
 
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)

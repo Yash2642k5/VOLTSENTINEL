@@ -78,4 +78,4 @@ uritemplate
 urllib3
 uvicorn
 watchdog
-websockets
+websocketsrequests

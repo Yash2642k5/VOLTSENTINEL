@@ -29,6 +29,17 @@ of the same signal (its "Stranding Risk" tile + red map ring), just
 scoped to the one asset currently open in this tab. Falls back to "—"
 when range_row is omitted, matching every other optional-param pattern
 already used in this file (e.g. profile_row.get(...) throughout).
+
+Weather-aware range (Future Roadmap Feature 8): range_row now may also
+carry `ambient_temp_c` / `weather_adjustment_factor` (from
+models/range_estimator.py, via dashboard/utils.get_vehicle_range_estimate()).
+render_health_summary_metrics appends the live ambient temperature to the
+"Live SoC / Range" metric text when available, and the stranding-risk
+banner notes when the range figure has been adjusted for weather. Both
+are purely additive — a range_row without these keys (e.g. weather lookup
+failed, or the dict came from an older/weather-agnostic call) renders
+exactly as it did before this feature, since both checks use
+`.get(...)` and only add text when the value is actually present.
 """
 
 from __future__ import annotations
@@ -254,11 +265,24 @@ def render_health_summary_metrics(
     # warning banner (not just a metric tile) when the vehicle is
     # currently at risk of stranding, so it's impossible to miss even if
     # the manager only glances at this tab.
+    #
+    # Weather-aware range (Feature 8): when the range estimate carried a
+    # live ambient temperature that actually pushed the adjustment factor
+    # above ~1% (i.e. weather materially affected this number, not just a
+    # rounding no-op), note that in the banner so the manager understands
+    # *why* the range figure might read lower than a naive kWh/rate
+    # calculation would suggest.
     if range_row and range_row.get("at_risk_of_stranding"):
+        weather_note = ""
+        if (
+            range_row.get("ambient_temp_c") is not None
+            and range_row.get("weather_adjustment_factor", 1.0) > 1.01
+        ):
+            weather_note = f" (range adjusted for {range_row['ambient_temp_c']:.0f}°C ambient)"
         st.warning(
             f"⚠️ **Low SoC/range** — currently at {format_pct(range_row.get('soc_pct'), decimals=0)} "
             f"state of charge, an estimated {format_km(range_row.get('estimated_range_km'))} of "
-            f"range remaining.",
+            f"range remaining{weather_note}.",
             icon="⚠️",
         )
 
@@ -267,13 +291,22 @@ def render_health_summary_metrics(
     cols[1].metric("Projected RUL", format_cycles(profile_row.get("rul_cycles")))
     cols[2].metric("Thermal Anomalies", format_count(profile_row.get("thermal_anomaly_count"), "anomaly"))
     cols[3].metric("Latest Temp", format_temperature(profile_row.get("latest_temp_c")))
-    cols[4].metric(
-        "Live SoC / Range",
-        (
+
+    # Live SoC/Range value — kept short enough to never truncate inside
+    # st.metric's fixed-width tile. The live ambient temperature (Feature
+    # 8), when available, is shown as a caption underneath instead of
+    # appended inline, since st.metric clips long strings rather than
+    # wrapping them.
+    if range_row:
+        live_value = (
             f"{format_pct(range_row.get('soc_pct'), decimals=0)} · "
             f"{format_km(range_row.get('estimated_range_km'))}"
-        ) if range_row else "—",
-    )
+        )
+    else:
+        live_value = "—"
+    cols[4].metric("Live SoC / Range", live_value)
+    if range_row and range_row.get("ambient_temp_c") is not None:
+        cols[4].caption(f"🌤️ {range_row['ambient_temp_c']:.0f}°C ambient")
 
 
 # ----------------------------------------------------------------------

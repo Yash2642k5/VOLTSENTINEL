@@ -53,6 +53,20 @@ Asset Detail summary row respectively. Both are thin wrappers around
 models/range_estimator.py — no new detection/estimation logic lives
 here, matching the "compute lives in models/, display lives in
 dashboard/" split noted above.
+
+Weather-aware range (Future Roadmap Feature 8):
+get_weather_client() below is a single st.cache_resource-cached
+models.weather_client.WeatherClient, shared across every rerun in a
+session — this is what makes the client's own internal per-coordinate
+TTL cache actually useful (dashboard reruns every few seconds via
+DEFAULT_CACHE_TTL_SECONDS below; a fresh client per rerun would defeat
+its cache entirely). get_fleet_range_estimates() and
+get_vehicle_range_estimate() now pass this client through to
+models/range_estimator.py's estimate_fleet()/estimate_vehicle_live() —
+if the live weather lookup fails for any reason, those functions
+degrade to their original weather-agnostic numbers automatically (see
+range_estimator.py's docstring), so nothing here needs its own
+try/except for that.
 """
 
 from __future__ import annotations
@@ -176,6 +190,21 @@ def clear_all_caches() -> None:
 
 
 # ----------------------------------------------------------------------
+# Weather client (Future Roadmap Feature 8) — one instance per session,
+# reused across reruns so its own internal per-coordinate TTL cache
+# (models/weather_client.py, default 10 minutes) actually avoids
+# refetching on every ~8s dashboard rerun. st.cache_resource, not
+# st.cache_data, since WeatherClient is a stateful object (holds its own
+# cache dict), matching get_connection()'s pattern above.
+# ----------------------------------------------------------------------
+@st.cache_resource
+def get_weather_client():
+    from models.weather_client import WeatherClient
+
+    return WeatherClient()
+
+
+# ----------------------------------------------------------------------
 # Cached queries — fleet-level
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
@@ -257,6 +286,7 @@ def get_current_drivers_by_vehicle(_conn: sqlite3.Connection) -> Dict[str, Dict[
 
 # ----------------------------------------------------------------------
 # Cached queries — live SoC / range estimation (Future Roadmap Feature 2)
+# Now weather-aware (Future Roadmap Feature 8) via get_weather_client().
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_fleet_range_estimates(_conn: sqlite3.Connection) -> pd.DataFrame:
@@ -267,7 +297,14 @@ def get_fleet_range_estimates(_conn: sqlite3.Connection) -> pd.DataFrame:
     answers a same-day operational question ("can this vehicle make it
     back right now?"), not a degradation one. Backs
     dashboard/components/fleet_map.py's stranding-risk tile/map-marker/
-    table columns."""
+    table columns.
+
+    Now also weather-adjusted (Feature 8): passes the session's shared
+    WeatherClient through to range_estimator.py's estimate_fleet(), so
+    the range figure reflects live ambient temperature per vehicle's
+    last known region. If the weather lookup fails for any reason, this
+    degrades automatically to the original weather-agnostic numbers —
+    no special-casing needed here."""
     from models.range_estimator import RangeEstimator
     from simulator.config import default_config
 
@@ -276,7 +313,7 @@ def get_fleet_range_estimates(_conn: sqlite3.Connection) -> pd.DataFrame:
         low_range_threshold_km=default_config.low_range_threshold_km,
         low_soc_threshold_pct=default_config.low_soc_threshold_pct,
     )
-    return estimator.estimate_fleet(_conn)
+    return estimator.estimate_fleet(_conn, weather_client=get_weather_client())
 
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
@@ -288,18 +325,22 @@ def get_vehicle_range_estimate(_conn: sqlite3.Connection, vehicle_id: str) -> Di
     -shaped dict; every field is None/False if the vehicle has no
     telemetry yet, matching get_vehicle_row()'s "explainable empty
     state" convention rather than raising or returning None outright —
-    callers can safely do range_row.get(...) either way."""
-    from ingestion.db import get_telemetry_for_vehicle
+    callers can safely do range_row.get(...) either way.
+
+    Now also weather-adjusted (Feature 8) via estimate_vehicle_live() and
+    the session's shared WeatherClient — same degrade-gracefully
+    behaviour as get_fleet_range_estimates() above."""
     from models.range_estimator import RangeEstimator
     from simulator.config import default_config
 
-    rows = get_telemetry_for_vehicle(_conn, vehicle_id)
     estimator = RangeEstimator(
         kwh_per_km=default_config.avg_kwh_per_km,
         low_range_threshold_km=default_config.low_range_threshold_km,
         low_soc_threshold_pct=default_config.low_soc_threshold_pct,
     )
-    return estimator.estimate_vehicle(vehicle_id, rows).to_dict()
+    return estimator.estimate_vehicle_live(
+        _conn, vehicle_id, weather_client=get_weather_client()
+    ).to_dict()
 
 
 # ----------------------------------------------------------------------

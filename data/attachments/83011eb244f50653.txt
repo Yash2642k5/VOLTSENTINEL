@@ -1,0 +1,1 @@
+[attack_injector] 2 vehicle(s) affected, 20 attack command(s) injected out of 42 total commands.

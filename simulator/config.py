@@ -158,6 +158,22 @@ class SimulatorConfig:
     )
 
     # ------------------------------------------------------------------
+    # Asset registry (make/model/VIN/purchase date/warranty)
+    # ------------------------------------------------------------------
+    vehicle_makes_models: Tuple[Tuple[str, str], ...] = (
+        ("Mahindra", "Treo"),
+        ("Piaggio", "Ape E-City"),
+        ("Kinetic Green", "Safar"),
+        ("Euler Motors", "HiLoad EV"),
+        ("Altigreen", "neEV Tez"),
+        ("TVS", "King EV Max"),
+        ("Bajaj", "RE EV"),
+        ("Omega Seiki", "Rage+"),
+    )
+    vehicle_warranty_years: float = 3.0
+    vehicle_age_range_days: Tuple[int, int] = (60, 1460)
+
+    # ------------------------------------------------------------------
     # Output paths (relative to project root)
     # ------------------------------------------------------------------
     seed_dir: str = "data/seed"

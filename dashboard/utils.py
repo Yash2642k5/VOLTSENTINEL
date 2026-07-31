@@ -254,6 +254,22 @@ def get_recent_actions(_conn: sqlite3.Connection, exclude_no_action: bool = True
 
 
 # ----------------------------------------------------------------------
+# Cached queries — asset registry
+# ----------------------------------------------------------------------
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_all_vehicle_metadata(_conn: sqlite3.Connection) -> pd.DataFrame:
+    """Full asset registry — make/model/VIN/purchase/warranty per vehicle."""
+    from ingestion.db import get_all_vehicle_metadata as _get_all_vehicle_metadata
+
+    rows = _get_all_vehicle_metadata(_conn)
+    if not rows:
+        return pd.DataFrame(columns=[
+            "vehicle_id", "make", "model", "vin", "purchase_date", "warranty_expiry_date",
+        ])
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+# ----------------------------------------------------------------------
 # Cached queries — drivers / vehicle assignments (Future Roadmap Feature 1)
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)

@@ -20,12 +20,13 @@ from simulator.config import SimulatorConfig
 from simulator.telemetry_generator import TelemetryGenerator
 from simulator.maintenance_generator import MaintenanceGenerator
 from simulator.attack_injector import AttackInjector
+from simulator.asset_generator import AssetGenerator
 
 from ingestion.db import (
     get_connection, init_db, insert_telemetry_batch,
-    insert_maintenance_batch, insert_command_batch,
+    insert_maintenance_batch, insert_command_batch, insert_vehicle_metadata_batch,
 )
-from ingestion.schemas import TelemetryReading, MaintenanceTicket, CommandEvent
+from ingestion.schemas import TelemetryReading, MaintenanceTicket, CommandEvent, VehicleMetadata
 
 from models.risk_engine import RiskEngine
 from models.rul_model import RULModel
@@ -72,6 +73,12 @@ def conn(small_config, simulated_data):
     insert_telemetry_batch(connection, readings)
     insert_maintenance_batch(connection, tickets)
     insert_command_batch(connection, commands)
+
+    agen = AssetGenerator(small_config)
+    tgen_for_ids = TelemetryGenerator(small_config)
+    assets_df = agen.generate_fleet_assets(tgen_for_ids.vehicle_ids)
+    assets = [VehicleMetadata(**r) for r in assets_df.to_dict(orient="records")]
+    insert_vehicle_metadata_batch(connection, assets)
 
     yield connection
     connection.close()
@@ -213,11 +220,19 @@ class TestTimeseries:
 
 
 # ----------------------------------------------------------------------
-# get_vehicle_metadata -- honest "not available" stub
+# get_vehicle_metadata -- asset registry lookup
 # ----------------------------------------------------------------------
 class TestVehicleMetadata:
-    def test_reports_unavailable_rather_than_fabricating(self, tools):
-        result = tools["get_vehicle_metadata"].fn(vehicle_id="EVR-0001")
+    def test_known_vehicle_returns_asset_registry_fields(self, profile_df, tools):
+        vid = profile_df["vehicle_id"].iloc[0]
+        result = tools["get_vehicle_metadata"].fn(vehicle_id=vid)
+        assert result["available"] is True
+        assert result["vehicle_id"] == vid
+        for field in ("make", "model", "vin", "purchase_date", "warranty_expiry_date"):
+            assert result[field]
+
+    def test_unknown_vehicle_reports_unavailable_rather_than_fabricating(self, tools):
+        result = tools["get_vehicle_metadata"].fn(vehicle_id="EVR-9999")
         assert result["available"] is False
         assert "message" in result
 

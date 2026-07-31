@@ -27,15 +27,18 @@ from ingestion.db import (
     get_connection, init_db, insert_telemetry_batch,
     insert_maintenance_batch, insert_command_batch, row_counts,
     insert_driver_batch, insert_vehicle_assignment_batch,
+    insert_vehicle_metadata_batch,
 )
 from ingestion.schemas import (
     TelemetryReading, MaintenanceTicket, CommandEvent, Driver, VehicleAssignment,
+    VehicleMetadata,
 )
 from simulator.config import SimulatorConfig
 from simulator.telemetry_generator import TelemetryGenerator
 from simulator.maintenance_generator import MaintenanceGenerator
 from simulator.attack_injector import AttackInjector
 from simulator.driver_generator import DriverGenerator
+from simulator.asset_generator import AssetGenerator
 
 
 def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe: bool) -> None:
@@ -59,6 +62,9 @@ def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe:
     driver_pool = dgen.get_driver_pool()
     assignments_df = dgen.generate_fleet_assignments(bounds)
 
+    agen = AssetGenerator(cfg)
+    assets_df = agen.generate_fleet_assets(tgen.vehicle_ids)
+
     readings = [TelemetryReading(**r) for r in telem_df.to_dict(orient="records")]
     tickets = [MaintenanceTicket(**r) for r in tickets_df.to_dict(orient="records")]
     commands = []
@@ -68,6 +74,7 @@ def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe:
         commands.append(CommandEvent(**r))
     drivers = [Driver(**r) for r in driver_pool]
     assignments = [VehicleAssignment(**r) for r in assignments_df.to_dict(orient="records")]
+    assets = [VehicleMetadata(**r) for r in assets_df.to_dict(orient="records")]
 
     conn = get_connection(db_path)
     init_db(conn)
@@ -77,6 +84,7 @@ def seed(fleet_size: int, num_cycles: int, random_seed: int, db_path: str, wipe:
     insert_command_batch(conn, commands)
     insert_driver_batch(conn, drivers)
     insert_vehicle_assignment_batch(conn, assignments)
+    insert_vehicle_metadata_batch(conn, assets)
 
     print(f"Seeded {db_path} — {row_counts(conn)}")
     conn.close()

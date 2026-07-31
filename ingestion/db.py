@@ -40,7 +40,9 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional
 
-from .schemas import CommandEvent, Driver, MaintenanceTicket, TelemetryReading, VehicleAssignment
+from .schemas import (
+    CommandEvent, Driver, MaintenanceTicket, TelemetryReading, VehicleAssignment, VehicleMetadata,
+)
 
 DB_PATH = os.path.join("data", "voltsentinel.db")
 
@@ -163,6 +165,20 @@ CREATE TABLE IF NOT EXISTS vehicle_assignments (
 );
 """
 
+# ----------------------------------------------------------------------
+# Asset registry — vehicle make/model/VIN/purchase/warranty
+# ----------------------------------------------------------------------
+_CREATE_VEHICLES = """
+CREATE TABLE IF NOT EXISTS vehicles (
+    vehicle_id              TEXT PRIMARY KEY,
+    make                    TEXT NOT NULL,
+    model                   TEXT NOT NULL,
+    vin                     TEXT NOT NULL UNIQUE,
+    purchase_date           TEXT NOT NULL,
+    warranty_expiry_date    TEXT NOT NULL
+);
+"""
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_telemetry_vehicle ON telemetry(vehicle_id);",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_timestamp ON telemetry(timestamp);",
@@ -184,6 +200,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_REJECTED_COMMANDS)
     conn.execute(_CREATE_DRIVERS)
     conn.execute(_CREATE_VEHICLE_ASSIGNMENTS)
+    conn.execute(_CREATE_VEHICLES)
     for stmt in _CREATE_INDEXES:
         conn.execute(stmt)
     conn.commit()
@@ -544,6 +561,47 @@ def get_current_driver_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) ->
 
 
 # ----------------------------------------------------------------------
+# Insert/query helpers — asset registry
+# ----------------------------------------------------------------------
+def insert_vehicle_metadata(conn: sqlite3.Connection, vehicle: VehicleMetadata) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO vehicles
+            (vehicle_id, make, model, vin, purchase_date, warranty_expiry_date)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            vehicle.vehicle_id, vehicle.make, vehicle.model, vehicle.vin,
+            _ts(vehicle.purchase_date), _ts(vehicle.warranty_expiry_date),
+        ),
+    )
+
+
+def insert_vehicle_metadata_batch(conn: sqlite3.Connection, vehicles: Iterable[VehicleMetadata]) -> int:
+    rows = [
+        (v.vehicle_id, v.make, v.model, v.vin, _ts(v.purchase_date), _ts(v.warranty_expiry_date))
+        for v in vehicles
+    ]
+    before = conn.total_changes
+    conn.executemany(
+        """INSERT OR IGNORE INTO vehicles
+            (vehicle_id, make, model, vin, purchase_date, warranty_expiry_date)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+    conn.commit()
+    return conn.total_changes - before
+
+
+def get_vehicle_metadata(conn: sqlite3.Connection, vehicle_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM vehicles WHERE vehicle_id = ?", (vehicle_id,)
+    ).fetchone()
+
+
+def get_all_vehicle_metadata(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    return conn.execute("SELECT * FROM vehicles ORDER BY vehicle_id").fetchall()
+
+
+# ----------------------------------------------------------------------
 # Query helpers — consumed by models/ (Phase 3) and dashboard/ (Phase 5)
 # ----------------------------------------------------------------------
 def get_all_vehicle_ids(conn: sqlite3.Connection) -> List[str]:
@@ -589,6 +647,7 @@ def row_counts(conn: sqlite3.Connection) -> dict:
         "commands": conn.execute("SELECT COUNT(*) FROM commands").fetchone()[0],
         "drivers": conn.execute("SELECT COUNT(*) FROM drivers").fetchone()[0],
         "vehicle_assignments": conn.execute("SELECT COUNT(*) FROM vehicle_assignments").fetchone()[0],
+        "vehicles": conn.execute("SELECT COUNT(*) FROM vehicles").fetchone()[0],
     }
 
 

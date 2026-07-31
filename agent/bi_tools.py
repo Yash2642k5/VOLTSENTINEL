@@ -37,8 +37,8 @@ BIChatEngine.create(enable_web_search=True)), and even then the model is
 instructed (BI_SYSTEM_PROMPT) to prefer every fleet-database tool first
 and only reach for web_search when the question genuinely needs
 information this system doesn't have — e.g. "what EV models should
-replace EVR-0012" (see get_vehicle_metadata's docstring: make/model data
-isn't wired in, so a real answer has to come from the web instead).
+replace EVR-0012" (get_vehicle_metadata has make/model/warranty data,
+not replacement opinions — that's what web_search is for).
 """
 
 from __future__ import annotations
@@ -225,22 +225,27 @@ def build_bi_tools(
         return result
 
     def get_vehicle_metadata(vehicle_id: str) -> Dict[str, Any]:
-        """Make/model/purchase-date metadata for a vehicle. NOT YET
-        AVAILABLE in this deployment — call this to check before assuming
-        it exists; it returns an honest 'unavailable' marker rather than a
-        fabricated make/model. For "what should replace this vehicle"
-        style questions, base the assessment on RUL/thermal/charge-stress
-        signals from the fleet tools, and use web_search (if available)
-        for actual replacement model suggestions."""
+        """Make/model/VIN/purchase-date/warranty-expiry metadata for a
+        vehicle, from the asset registry. Returns an honest 'unavailable'
+        marker (not a fabricated make/model) if this vehicle_id has no
+        registry entry — e.g. a live-injected ID from a DB seeded before
+        the asset registry existed."""
+        from ingestion.db import get_vehicle_metadata as _get_vehicle_metadata
+
+        row = _get_vehicle_metadata(conn, vehicle_id)
+        if row is None:
+            return {
+                "available": False,
+                "message": f"No asset-registry entry for '{vehicle_id}'.",
+            }
         return {
-            "available": False,
-            "message": (
-                "Vehicle make/model/purchase-date metadata isn't wired into "
-                "VoltSentinel yet — only battery telemetry and risk signals "
-                "are available. Base replacement suggestions on RUL, thermal, "
-                "and charge-stress signals, and use web_search for actual "
-                "replacement vehicle/model recommendations if that tool is available."
-            ),
+            "available": True,
+            "vehicle_id": row["vehicle_id"],
+            "make": row["make"],
+            "model": row["model"],
+            "vin": row["vin"],
+            "purchase_date": row["purchase_date"],
+            "warranty_expiry_date": row["warranty_expiry_date"],
         }
 
     def web_search(query: str) -> Dict[str, Any]:

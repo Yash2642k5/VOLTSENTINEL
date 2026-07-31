@@ -139,6 +139,26 @@ class Driver(BaseModel):
         return v
 
 
+class VehicleMetadata(BaseModel):
+    """Asset-registry record: make, model, VIN, purchase date, warranty expiry."""
+
+    vehicle_id: str
+    make: str
+    model: str
+    vin: str
+    purchase_date: datetime
+    warranty_expiry_date: datetime
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("vin")
+    @classmethod
+    def vin_format(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("vin must not be empty")
+        return v
+
+
 class VehicleAssignment(BaseModel):
     """One shift-assignment record: which driver had which vehicle over a
     given shift window. Matches
@@ -182,6 +202,10 @@ class DriverBatch(BaseModel):
 
 class VehicleAssignmentBatch(BaseModel):
     assignments: List[VehicleAssignment]
+
+
+class VehicleMetadataBatch(BaseModel):
+    vehicles: List[VehicleMetadata]
 
 
 # ----------------------------------------------------------------------

@@ -99,10 +99,12 @@ tool result. If you don't have enough information yet, call another tool instead
 guessing.
 - If a tool result contains an "error" key, read it, adjust your arguments, and try \
 again rather than repeating the same failing call.
-- Vehicle make/model/purchase-date metadata is not currently available — call \
-get_vehicle_metadata to confirm this if asked, and for "which vehicles should I \
-replace" style questions, answer using RUL, thermal-anomaly, and charge-stress \
-signals, then use web_search (if available) for actual replacement model suggestions.
+- Vehicle make/model/VIN/purchase-date/warranty-expiry metadata is available via \
+get_vehicle_metadata — use it for identity/ownership/warranty questions. It has no \
+opinion on replacement models though: for "which vehicles should I replace" style \
+questions, combine its make/model/warranty data with RUL, thermal-anomaly, and \
+charge-stress signals, then use web_search (if available) for actual replacement \
+model suggestions.
 - If you use web_search, cite what you found in "text" and don't present it as fleet \
 data — make clear it's external/general information, not something from this fleet's \
 own telemetry.

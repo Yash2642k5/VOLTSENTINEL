@@ -59,6 +59,7 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
+from dashboard.exports import export_dataframe_to_excel, export_dataframe_to_pdf
 from dashboard.utils import (
     RISK_LEVEL_COLORS,
     RISK_LEVEL_ORDER,
@@ -253,6 +254,17 @@ def render_fleet_table(
 
     styled_view = view.style.apply(_style_attacked_row, attacked_vehicle_id=attacked_vehicle_id, axis=1)
     st.dataframe(styled_view, use_container_width=True, hide_index=True)
+
+    export_col1, export_col2 = st.columns(2)
+    export_col1.download_button(
+        "⬇️ Export Excel", data=export_dataframe_to_excel(view, sheet_name="Fleet"),
+        file_name="voltsentinel_fleet_report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    export_col2.download_button(
+        "⬇️ Export PDF", data=export_dataframe_to_pdf(view, title="VoltSentinel Fleet Report"),
+        file_name="voltsentinel_fleet_report.pdf", mime="application/pdf",
+    )
 
     if attacked_vehicle_id and attacked_vehicle_id in view["Vehicle"].values:
         st.caption(f"🔴 **{attacked_vehicle_id}** is highlighted — unauthorized command detected.")

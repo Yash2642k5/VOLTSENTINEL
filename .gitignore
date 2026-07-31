@@ -23,6 +23,8 @@ ENV/
 data/*.db
 data/*.sqlite3
 data/*.db-journal
+data/*.db-wal
+data/*.db-shm
 
 # --- Streamlit ---
 .streamlit/secrets.toml

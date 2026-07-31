@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
+from dashboard.exports import export_dataframe_to_excel, export_dataframe_to_pdf
 from dashboard.utils import format_hours, risk_level_label
 
 
@@ -94,3 +95,14 @@ def render_asset_registry(conn, profile_df: pd.DataFrame) -> None:
     col3.metric("Expired Warranty", int((view["Warranty Status"] == "Expired").sum()))
 
     st.dataframe(view, use_container_width=True, hide_index=True)
+
+    export_col1, export_col2 = st.columns(2)
+    export_col1.download_button(
+        "⬇️ Export Excel", data=export_dataframe_to_excel(view, sheet_name="Asset Registry"),
+        file_name="voltsentinel_asset_registry.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    export_col2.download_button(
+        "⬇️ Export PDF", data=export_dataframe_to_pdf(view, title="VoltSentinel Asset Registry"),
+        file_name="voltsentinel_asset_registry.pdf", mime="application/pdf",
+    )

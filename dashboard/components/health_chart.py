@@ -287,15 +287,15 @@ def render_health_summary_metrics(
         )
 
     data_quality_notes = []
-    if row.get("is_stale"):
-        hours = row.get("hours_since_last_reading")
+    if profile_row.get("is_stale"):
+        hours = profile_row.get("hours_since_last_reading")
         data_quality_notes.append(
             f"no telemetry in {hours:.0f}h" if _is_valid_number(hours) else "stale sensor feed"
         )
-    if _is_valid_number(row.get("missing_cycle_count")) and row["missing_cycle_count"] > 0:
-        data_quality_notes.append(f"{int(row['missing_cycle_count'])} missing cycle(s)")
-    if _is_valid_number(row.get("out_of_range_jump_count")) and row["out_of_range_jump_count"] > 0:
-        data_quality_notes.append(f"{int(row['out_of_range_jump_count'])} out-of-range reading(s)")
+    if _is_valid_number(profile_row.get("missing_cycle_count")) and profile_row["missing_cycle_count"] > 0:
+        data_quality_notes.append(f"{int(profile_row['missing_cycle_count'])} missing cycle(s)")
+    if _is_valid_number(profile_row.get("out_of_range_jump_count")) and profile_row["out_of_range_jump_count"] > 0:
+        data_quality_notes.append(f"{int(profile_row['out_of_range_jump_count'])} out-of-range reading(s)")
     if data_quality_notes:
         st.warning(f"📡 **Data quality issue** — {', '.join(data_quality_notes)}.", icon="📡")
 

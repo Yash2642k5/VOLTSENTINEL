@@ -112,9 +112,17 @@ class TestMergeCorrectness:
             "thermal_anomaly_count", "critical_temp_count",
             "unticketed_command_count", "max_security_severity", "suspicious_command_count",
             "fast_charge_frequency_pct", "mean_dod_pct", "charge_stress_score",
+            "missing_cycle_count", "is_stale", "hours_since_last_reading", "out_of_range_jump_count",
             "overall_risk_level",
         }
         assert expected.issubset(set(profile_df.columns))
+
+    def test_freshly_seeded_fleet_has_no_data_quality_issues(self, profile_df):
+        """Simulator-seeded telemetry is contiguous and in-range by
+        construction — the only genuinely expected finding is staleness,
+        since seeded timestamps aren't tied to wall-clock 'now'."""
+        assert (profile_df["missing_cycle_count"] == 0).all()
+        assert (profile_df["out_of_range_jump_count"] == 0).all()
 
     def test_no_null_risk_level(self, profile_df):
         assert profile_df["overall_risk_level"].notnull().all()
@@ -202,3 +210,11 @@ class TestRiskBanding:
             "max_security_severity": "high", "charge_stress_score": 10,
         })
         assert engine._overall_risk_level(row) == "high"
+
+    def test_data_quality_issue_counts_as_a_concern(self, engine):
+        row = pd.Series({
+            "status": "degraded", "thermal_anomaly_count": 0,
+            "max_security_severity": "none", "charge_stress_score": 30,
+            "is_stale": True,
+        })
+        assert engine._overall_risk_level(row) == "medium"  # degraded + stale = 2 concerns

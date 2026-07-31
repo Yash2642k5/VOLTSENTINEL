@@ -61,9 +61,13 @@ def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
     # here specifically because Streamlit processes reruns for a given
     # session sequentially, never concurrently, so there is no risk of two
     # threads touching the connection at the same instant.
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL: lets a live-feed process (scripts/live_feed.py) append rows while
+    # the dashboard holds its own connection open on the same file, instead
+    # of readers/writers blocking each other under the default journal mode.
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -179,6 +183,23 @@ CREATE TABLE IF NOT EXISTS vehicles (
 );
 """
 
+# ----------------------------------------------------------------------
+# Live vehicle state — current position + activity, written by
+# scripts/live_feed.py every tick. Separate from `commands` (sparse BMS
+# events) since this is a continuous, always-current "where is it and is
+# it moving" signal.
+# ----------------------------------------------------------------------
+_CREATE_VEHICLE_LIVE_STATE = """
+CREATE TABLE IF NOT EXISTS vehicle_live_state (
+    vehicle_id      TEXT PRIMARY KEY,
+    latitude        REAL NOT NULL,
+    longitude       REAL NOT NULL,
+    status          TEXT NOT NULL,
+    last_moved_at   TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+"""
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_telemetry_vehicle ON telemetry(vehicle_id);",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_timestamp ON telemetry(timestamp);",
@@ -201,6 +222,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_DRIVERS)
     conn.execute(_CREATE_VEHICLE_ASSIGNMENTS)
     conn.execute(_CREATE_VEHICLES)
+    conn.execute(_CREATE_VEHICLE_LIVE_STATE)
     for stmt in _CREATE_INDEXES:
         conn.execute(stmt)
     conn.commit()
@@ -602,6 +624,35 @@ def get_all_vehicle_metadata(conn: sqlite3.Connection) -> List[sqlite3.Row]:
 
 
 # ----------------------------------------------------------------------
+# Live vehicle state — position + activity, written by scripts/live_feed.py
+# ----------------------------------------------------------------------
+def upsert_vehicle_live_state(
+    conn: sqlite3.Connection, vehicle_id: str, latitude: float, longitude: float,
+    status: str, last_moved_at: str, updated_at: str,
+) -> None:
+    conn.execute(
+        """INSERT INTO vehicle_live_state
+            (vehicle_id, latitude, longitude, status, last_moved_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(vehicle_id) DO UPDATE SET
+            latitude = excluded.latitude, longitude = excluded.longitude,
+            status = excluded.status, last_moved_at = excluded.last_moved_at,
+            updated_at = excluded.updated_at""",
+        (vehicle_id, latitude, longitude, status, last_moved_at, updated_at),
+    )
+
+
+def get_vehicle_live_state(conn: sqlite3.Connection, vehicle_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM vehicle_live_state WHERE vehicle_id = ?", (vehicle_id,)
+    ).fetchone()
+
+
+def get_all_vehicle_live_state(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    return conn.execute("SELECT * FROM vehicle_live_state ORDER BY vehicle_id").fetchall()
+
+
+# ----------------------------------------------------------------------
 # Query helpers — consumed by models/ (Phase 3) and dashboard/ (Phase 5)
 # ----------------------------------------------------------------------
 def get_all_vehicle_ids(conn: sqlite3.Connection) -> List[str]:
@@ -613,6 +664,12 @@ def get_telemetry_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) -> List
     return conn.execute(
         "SELECT * FROM telemetry WHERE vehicle_id = ? ORDER BY cycle", (vehicle_id,)
     ).fetchall()
+
+
+def get_latest_telemetry_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM telemetry WHERE vehicle_id = ? ORDER BY cycle DESC LIMIT 1", (vehicle_id,)
+    ).fetchone()
 
 
 def get_tickets_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) -> List[sqlite3.Row]:

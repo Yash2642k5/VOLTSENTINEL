@@ -161,3 +161,19 @@ class TestBuildAssetRegistryView:
     def test_missing_profile_leaves_risk_level_unknown(self, assets_df):
         view = build_asset_registry_view(assets_df, pd.DataFrame())
         assert (view["Risk Level"] == "Unknown").all()
+
+    def test_merges_reliability_metrics_when_available(self, assets_df):
+        vid = assets_df["vehicle_id"].iloc[0]
+        reliability_df = pd.DataFrame([
+            {"vehicle_id": vid, "ticket_count": 3, "mtbf_hours": 120.5, "mttr_hours": 4.0},
+        ])
+        view = build_asset_registry_view(assets_df, pd.DataFrame(), reliability_df)
+        row = view[view["Vehicle ID"] == vid].iloc[0]
+        assert row["Maintenance Events"] == 3
+        assert row["MTBF"] == "120.5 hrs"
+        assert row["MTTR"] == "4.0 hrs"
+
+    def test_missing_reliability_data_shows_placeholder(self, assets_df):
+        view = build_asset_registry_view(assets_df, pd.DataFrame())
+        assert (view["MTBF"] == "—").all()
+        assert (view["MTTR"] == "—").all()

@@ -63,6 +63,7 @@ SUMMARY_COLUMNS = [
     "max_security_severity", "unticketed_command_count", "suspicious_command_count",
     "fast_charge_frequency_pct", "mean_dod_pct", "charge_stress_score",
     "stress_trend", "suggested_policy",
+    "missing_cycle_count", "is_stale", "hours_since_last_reading", "out_of_range_jump_count",
 ]
 
 TIMESERIES_METRICS = ("capacity_pct_of_rated", "temperature_c", "soc_pct", "dod_pct", "voltage")
@@ -248,6 +249,18 @@ def build_bi_tools(
             "warranty_expiry_date": row["warranty_expiry_date"],
         }
 
+    def get_reliability_metrics(vehicle_id: str) -> Dict[str, Any]:
+        """MTBF/MTTR (in hours) and maintenance-event counts for one
+        vehicle, computed from agent-flagged maintenance triggers and
+        telemetry timestamps. status is 'insufficient_data' if the
+        vehicle has fewer than 2 maintenance triggers logged."""
+        from ingestion.db import get_all_vehicle_ids
+        from models.reliability_metrics import ReliabilityAnalyzer
+
+        if vehicle_id not in get_all_vehicle_ids(conn):
+            return {"error": f"no vehicle '{vehicle_id}' in the fleet"}
+        return ReliabilityAnalyzer().analyze_vehicle(conn, vehicle_id).to_dict()
+
     def web_search(query: str) -> Dict[str, Any]:
         """Searches the public web for information the fleet database
         cannot provide — e.g. replacement EV or battery-pack models,
@@ -292,7 +305,7 @@ def build_bi_tools(
     fns = [
         get_fleet_summary, list_vehicles, get_vehicle_profile, compare_vehicles,
         rank_vehicles, get_vehicle_timeseries, compare_vehicle_timeseries,
-        get_vehicle_metadata,
+        get_vehicle_metadata, get_reliability_metrics,
     ]
     # web_search is only ever registered — i.e. only ever visible to the
     # model as an available tool at all — when a search_client was passed

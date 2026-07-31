@@ -286,6 +286,19 @@ def render_health_summary_metrics(
             icon="⚠️",
         )
 
+    data_quality_notes = []
+    if row.get("is_stale"):
+        hours = row.get("hours_since_last_reading")
+        data_quality_notes.append(
+            f"no telemetry in {hours:.0f}h" if _is_valid_number(hours) else "stale sensor feed"
+        )
+    if _is_valid_number(row.get("missing_cycle_count")) and row["missing_cycle_count"] > 0:
+        data_quality_notes.append(f"{int(row['missing_cycle_count'])} missing cycle(s)")
+    if _is_valid_number(row.get("out_of_range_jump_count")) and row["out_of_range_jump_count"] > 0:
+        data_quality_notes.append(f"{int(row['out_of_range_jump_count'])} out-of-range reading(s)")
+    if data_quality_notes:
+        st.warning(f"📡 **Data quality issue** — {', '.join(data_quality_notes)}.", icon="📡")
+
     cols = st.columns(5)
     cols[0].metric("Current Capacity", format_pct(profile_row.get("current_capacity_pct")))
     cols[1].metric("Projected RUL", format_cycles(profile_row.get("rul_cycles")))

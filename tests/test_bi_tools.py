@@ -27,6 +27,7 @@ from ingestion.db import (
     insert_maintenance_batch, insert_command_batch, insert_vehicle_metadata_batch,
 )
 from ingestion.schemas import TelemetryReading, MaintenanceTicket, CommandEvent, VehicleMetadata
+from agent.actions import create_maintenance_ticket
 
 from models.risk_engine import RiskEngine
 from models.rul_model import RULModel
@@ -80,6 +81,12 @@ def conn(small_config, simulated_data):
     assets = [VehicleMetadata(**r) for r in assets_df.to_dict(orient="records")]
     insert_vehicle_metadata_batch(connection, assets)
 
+    # two maintenance triggers on one vehicle, so get_reliability_metrics has
+    # an "ok" case to exercise alongside the untouched vehicles' insufficient_data
+    reliability_vehicle = tgen_for_ids.vehicle_ids[0]
+    create_maintenance_ticket(connection, reliability_vehicle, "test trigger 1")
+    create_maintenance_ticket(connection, reliability_vehicle, "test trigger 2")
+
     yield connection
     connection.close()
     if os.path.exists(TEST_DB_PATH):
@@ -95,6 +102,11 @@ def profile_df(small_config, conn):
 @pytest.fixture(scope="module")
 def tools(conn, profile_df):
     return build_bi_tools(conn, profile_df)
+
+
+@pytest.fixture(scope="module")
+def reliability_vehicle_id(small_config):
+    return TelemetryGenerator(small_config).vehicle_ids[0]
 
 
 # ----------------------------------------------------------------------
@@ -235,6 +247,26 @@ class TestVehicleMetadata:
         result = tools["get_vehicle_metadata"].fn(vehicle_id="EVR-9999")
         assert result["available"] is False
         assert "message" in result
+
+
+# ----------------------------------------------------------------------
+# get_reliability_metrics
+# ----------------------------------------------------------------------
+class TestReliabilityMetrics:
+    def test_vehicle_with_triggers_reports_ok(self, tools, reliability_vehicle_id):
+        result = tools["get_reliability_metrics"].fn(vehicle_id=reliability_vehicle_id)
+        assert result["status"] == "ok"
+        assert result["maintenance_trigger_count"] == 2
+        assert result["mtbf_hours"] is not None
+
+    def test_vehicle_with_no_trigger_history_is_insufficient_data(self, profile_df, tools, reliability_vehicle_id):
+        other_vehicle = [v for v in profile_df["vehicle_id"] if v != reliability_vehicle_id][0]
+        result = tools["get_reliability_metrics"].fn(vehicle_id=other_vehicle)
+        assert result["status"] == "insufficient_data"
+
+    def test_unknown_vehicle_returns_error(self, tools):
+        result = tools["get_reliability_metrics"].fn(vehicle_id="EVR-9999")
+        assert "error" in result
 
 
 # ----------------------------------------------------------------------

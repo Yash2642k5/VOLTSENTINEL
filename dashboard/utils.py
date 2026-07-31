@@ -270,6 +270,17 @@ def get_all_vehicle_metadata(_conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------
+# Cached queries — reliability metrics (MTBF/MTTR)
+# ----------------------------------------------------------------------
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_fleet_reliability_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
+    """MTBF/MTTR and maintenance-event counts per vehicle."""
+    from models.reliability_metrics import ReliabilityAnalyzer
+
+    return ReliabilityAnalyzer().analyze_fleet(_conn)
+
+
+# ----------------------------------------------------------------------
 # Cached queries — drivers / vehicle assignments (Future Roadmap Feature 1)
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
@@ -448,6 +459,27 @@ def get_latest_vehicle_locations(_conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["vehicle_id", "latitude", "longitude", "timestamp", "command_type"])
 
 
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
+def get_fleet_live_state(_conn: sqlite3.Connection) -> pd.DataFrame:
+    """Current position + active/inactive status per vehicle, written by
+    scripts/live_feed.py. Empty until the live feed has run at least
+    once against this DB — fleet_map.py falls back to
+    get_latest_vehicle_locations()'s command-derived location for
+    vehicles absent here."""
+    from ingestion.db import get_all_vehicle_live_state
+
+    rows = get_all_vehicle_live_state(_conn)
+    if not rows:
+        return pd.DataFrame(columns=["vehicle_id", "latitude", "longitude", "activity_status", "last_moved_at"])
+    return pd.DataFrame([
+        {
+            "vehicle_id": r["vehicle_id"], "latitude": r["latitude"], "longitude": r["longitude"],
+            "activity_status": r["status"], "last_moved_at": r["last_moved_at"],
+        }
+        for r in rows
+    ])
+
+
 # ----------------------------------------------------------------------
 # Fleet-wide summary stats — backs app.py's top-level metric row
 # ----------------------------------------------------------------------
@@ -492,6 +524,12 @@ def format_cycles(value: Optional[float], placeholder: str = "—") -> str:
     if value is None or pd.isnull(value):
         return placeholder
     return f"{value:,.0f} cycles"
+
+
+def format_hours(value: Optional[float], placeholder: str = "—") -> str:
+    if value is None or pd.isnull(value):
+        return placeholder
+    return f"{value:,.1f} hrs"
 
 
 def format_km(value: Optional[float], placeholder: str = "—") -> str:

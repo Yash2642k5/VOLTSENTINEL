@@ -70,6 +70,7 @@ from dashboard.utils import (
     format_km,
     format_pct,
     get_current_drivers_by_vehicle,
+    get_fleet_live_state,
     get_fleet_profile,
     get_fleet_range_estimates,
     get_latest_vehicle_locations,
@@ -95,6 +96,14 @@ STRANDING_RISK_RING_COLOR = [255, 82, 82, 255]   # bright red ring
 NORMAL_RING_COLOR = [255, 255, 255, 255]
 STRANDING_RISK_LINE_WIDTH = 3
 NORMAL_LINE_WIDTH = 1
+
+# Live vehicle state (scripts/live_feed.py) — inactive vehicles get a
+# dimmer marker (lower alpha) rather than a different color, so
+# overall_risk_level's fill color stays the one consistent "what color
+# means what" signal across the whole dashboard.
+ACTIVITY_STATUS_LABELS = {"active": "🟢 Active", "inactive": "⚪ Inactive"}
+ACTIVE_MARKER_ALPHA = 200
+INACTIVE_MARKER_ALPHA = 90
 
 
 def _hex_to_rgba(hex_color: str, alpha: int = 200) -> List[int]:
@@ -144,6 +153,7 @@ def build_fleet_table_view(
     profile_df: pd.DataFrame,
     driver_by_vehicle: Optional[Dict[str, Dict[str, Any]]] = None,
     range_df: Optional[pd.DataFrame] = None,
+    live_state_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Pure transform: picks/renames/formats the columns worth showing
     in the fleet table, in a fixed risk-descending sort so the assets
@@ -160,7 +170,11 @@ def build_fleet_table_view(
     range_df: optional output of models.range_estimator.RangeEstimator
     .estimate_fleet() / dashboard.utils.get_fleet_range_estimates() —
     when omitted, "SoC" / "Est. Range" read "—" rather than the columns
-    being dropped, matching driver_by_vehicle's fallback convention."""
+    being dropped, matching driver_by_vehicle's fallback convention.
+
+    live_state_df: optional dashboard.utils.get_fleet_live_state() output
+    — when omitted (or a vehicle is absent from it, e.g. the live feed
+    hasn't run yet), "Activity" reads "—" rather than being dropped."""
     if profile_df.empty:
         return profile_df
 
@@ -168,6 +182,10 @@ def build_fleet_table_view(
     range_by_vehicle = (
         range_df.set_index("vehicle_id").to_dict(orient="index")
         if range_df is not None and not range_df.empty else {}
+    )
+    activity_by_vehicle = (
+        live_state_df.set_index("vehicle_id")["activity_status"].to_dict()
+        if live_state_df is not None and not live_state_df.empty else {}
     )
 
     rank = {level: i for i, level in enumerate(RISK_LEVEL_ORDER)}
@@ -179,6 +197,9 @@ def build_fleet_table_view(
         "Vehicle": df["vehicle_id"],
         "Driver": df["vehicle_id"].map(
             lambda vid: driver_by_vehicle.get(vid, {}).get("name") or UNASSIGNED_DRIVER_LABEL
+        ),
+        "Activity": df["vehicle_id"].map(
+            lambda vid: ACTIVITY_STATUS_LABELS.get(activity_by_vehicle.get(vid), "—")
         ),
         "Risk": df["overall_risk_level"].map(risk_level_label),
         "Battery Status": df["status"].map(status_plain_label),
@@ -211,6 +232,7 @@ def render_fleet_table(
     profile_df: pd.DataFrame,
     driver_by_vehicle: Optional[Dict[str, Dict[str, Any]]] = None,
     range_df: Optional[pd.DataFrame] = None,
+    live_state_df: Optional[pd.DataFrame] = None,
 ) -> Optional[str]:
     """Renders the table and a vehicle picker below it. Returns the
     selected vehicle_id (or None if the fleet is empty) — app.py uses
@@ -219,7 +241,9 @@ def render_fleet_table(
         st.info("No vehicles in the fleet profile yet.")
         return None
 
-    view = build_fleet_table_view(profile_df, driver_by_vehicle=driver_by_vehicle, range_df=range_df)
+    view = build_fleet_table_view(
+        profile_df, driver_by_vehicle=driver_by_vehicle, range_df=range_df, live_state_df=live_state_df
+    )
 
     # attack_trigger.py sets this the moment a live attack is injected —
     # reused here (same key fleet_map.py's map view already reads) so the
@@ -240,29 +264,55 @@ def render_fleet_table(
 # ----------------------------------------------------------------------
 # Map
 # ----------------------------------------------------------------------
+def _merge_live_locations(locations_df: pd.DataFrame, live_state_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Prefers live_state_df's continuously-updated position/activity for
+    a vehicle when present, falling back to locations_df's command-
+    derived last-known position for vehicles the live feed hasn't
+    touched yet (or hasn't run at all)."""
+    if live_state_df is None or live_state_df.empty:
+        base = locations_df.copy()
+        base["activity_status"] = None
+        return base
+
+    live = live_state_df[["vehicle_id", "latitude", "longitude", "activity_status"]].copy()
+    command_only = locations_df[~locations_df["vehicle_id"].isin(live["vehicle_id"])]
+    if command_only.empty:
+        return live
+    extra = command_only[["vehicle_id", "latitude", "longitude"]].copy()
+    extra["activity_status"] = None
+    return pd.concat([live, extra], ignore_index=True)
+
+
 def build_vehicle_scatter_data(
     locations_df: pd.DataFrame,
     profile_df: pd.DataFrame,
     range_df: Optional[pd.DataFrame] = None,
+    live_state_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Merges last-known location with risk level (fill color) and,
+    """Merges current location with risk level (fill color) and,
     when range_df is supplied, stranding-risk status (ring color/width)
     — pure data prep, no pydeck/streamlit objects, so this is
     straightforward to unit test.
 
     Fill color still encodes overall_risk_level exactly as before; the
-    ring around each marker is the new, independent stranding-risk
-    channel — a vehicle can show up as e.g. "medium risk fill + red
-    stranding ring" without one signal overwriting the other."""
-    if locations_df.empty:
-        return locations_df
+    ring around each marker is the independent stranding-risk channel.
+    live_state_df (scripts/live_feed.py's output) additionally dims
+    inactive vehicles' markers (lower fill alpha) rather than changing
+    their color, so risk-level color stays the one consistent signal."""
+    base = _merge_live_locations(locations_df, live_state_df)
+    if base.empty:
+        return base
 
-    merged = locations_df.merge(
+    merged = base.merge(
         profile_df[["vehicle_id", "overall_risk_level", "status"]], on="vehicle_id", how="left"
     )
     merged["overall_risk_level"] = merged["overall_risk_level"].fillna("minimal")
-    merged["fill_color"] = merged["overall_risk_level"].map(
-        lambda level: _hex_to_rgba(RISK_LEVEL_COLORS.get(level, "#757575"))
+    merged["fill_color"] = merged.apply(
+        lambda r: _hex_to_rgba(
+            RISK_LEVEL_COLORS.get(r["overall_risk_level"], "#757575"),
+            alpha=INACTIVE_MARKER_ALPHA if r["activity_status"] == "inactive" else ACTIVE_MARKER_ALPHA,
+        ),
+        axis=1,
     )
 
     if range_df is not None and not range_df.empty:
@@ -286,6 +336,7 @@ def build_vehicle_scatter_data(
         lambda r: (
             f"{r['vehicle_id']} — {risk_level_label(r['overall_risk_level'])} risk"
             + (" — ⚠️ LOW RANGE" if r["at_risk_of_stranding"] else "")
+            + (f" — {ACTIVITY_STATUS_LABELS[r['activity_status']]}" if r["activity_status"] in ACTIVITY_STATUS_LABELS else "")
         ),
         axis=1,
     )
@@ -352,12 +403,16 @@ def _initial_view_state(scatter_df: pd.DataFrame) -> pdk.ViewState:
     )
 
 
-def render_fleet_map(conn, profile_df: pd.DataFrame, range_df: Optional[pd.DataFrame] = None) -> None:
+def render_fleet_map(
+    conn, profile_df: pd.DataFrame,
+    range_df: Optional[pd.DataFrame] = None,
+    live_state_df: Optional[pd.DataFrame] = None,
+) -> None:
     locations_df = get_latest_vehicle_locations(conn)
     all_vehicle_ids = get_vehicle_ids(conn)
-    missing = len(all_vehicle_ids) - len(locations_df)
 
-    scatter_df = build_vehicle_scatter_data(locations_df, profile_df, range_df=range_df)
+    scatter_df = build_vehicle_scatter_data(locations_df, profile_df, range_df=range_df, live_state_df=live_state_df)
+    missing = len(all_vehicle_ids) - len(scatter_df)
 
     layers = [build_depot_layer()]
     if not scatter_df.empty:
@@ -367,17 +422,17 @@ def render_fleet_map(conn, profile_df: pd.DataFrame, range_df: Optional[pd.DataF
         map_style=None,  # falls back to pydeck's default light basemap, no Mapbox token required
         initial_view_state=_initial_view_state(scatter_df),
         layers=layers,
-        tooltip={"text": "{label}\n{command_type} at {timestamp}"} if not scatter_df.empty else None,
+        tooltip={"text": "{label}"} if not scatter_df.empty else None,
     )
     st.pydeck_chart(deck)
 
     if missing > 0:
         st.caption(
-            f"{format_count(missing, 'vehicle')} not shown — no BMS command history yet "
-            f"(dark gray markers are depot locations; red ring = low SoC/range)."
+            f"{format_count(missing, 'vehicle')} not shown — no BMS command or live-feed history yet "
+            f"(dark gray markers are depot locations; red ring = low SoC/range; dim marker = inactive)."
         )
     else:
-        st.caption("Dark gray markers are depot locations. Red ring = low SoC/range.")
+        st.caption("Dark gray markers are depot locations. Red ring = low SoC/range. Dim marker = inactive.")
 
 
 # ----------------------------------------------------------------------
@@ -391,13 +446,14 @@ def render_fleet_overview(conn) -> Tuple[pd.DataFrame, Optional[str]]:
     profile_df = get_fleet_profile(conn)
     driver_by_vehicle = get_current_drivers_by_vehicle(conn)
     range_df = get_fleet_range_estimates(conn)
+    live_state_df = get_fleet_live_state(conn)
 
     render_fleet_summary_metrics(profile_df, range_df=range_df)
     st.markdown("#### 🗺️ Fleet Map")
-    render_fleet_map(conn, profile_df, range_df=range_df)
+    render_fleet_map(conn, profile_df, range_df=range_df, live_state_df=live_state_df)
     st.markdown("#### 📋 Fleet Assets")
     selected_vehicle_id = render_fleet_table(
-        profile_df, driver_by_vehicle=driver_by_vehicle, range_df=range_df
+        profile_df, driver_by_vehicle=driver_by_vehicle, range_df=range_df, live_state_df=live_state_df
     )
 
     return profile_df, selected_vehicle_id

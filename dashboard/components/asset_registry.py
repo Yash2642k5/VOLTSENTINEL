@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
-from dashboard.utils import risk_level_label
+from dashboard.utils import format_hours, risk_level_label
 
 
 def _warranty_status(warranty_expiry: str, now: datetime) -> str:
@@ -21,7 +21,10 @@ def _warranty_status(warranty_expiry: str, now: datetime) -> str:
 
 
 def build_asset_registry_view(
-    metadata_df: pd.DataFrame, profile_df: pd.DataFrame, now: datetime | None = None,
+    metadata_df: pd.DataFrame,
+    profile_df: pd.DataFrame,
+    reliability_df: pd.DataFrame | None = None,
+    now: datetime | None = None,
 ) -> pd.DataFrame:
     if metadata_df.empty:
         return metadata_df
@@ -35,6 +38,14 @@ def build_asset_registry_view(
         )
     else:
         df["overall_risk_level"] = None
+
+    if reliability_df is not None and not reliability_df.empty:
+        df = df.merge(
+            reliability_df[["vehicle_id", "ticket_count", "mtbf_hours", "mttr_hours"]],
+            on="vehicle_id", how="left",
+        )
+    else:
+        df["ticket_count"], df["mtbf_hours"], df["mttr_hours"] = None, None, None
 
     df["purchase_date_parsed"] = pd.to_datetime(df["purchase_date"]).dt.tz_localize(None)
     df["warranty_expiry_parsed"] = pd.to_datetime(df["warranty_expiry_date"]).dt.tz_localize(None)
@@ -54,21 +65,28 @@ def build_asset_registry_view(
         "Risk Level": df["overall_risk_level"].map(
             lambda v: risk_level_label(v if pd.notnull(v) else None)
         ),
+        "Maintenance Events": df["ticket_count"],
+        "MTBF": df["mtbf_hours"].map(lambda v: format_hours(v if pd.notnull(v) else None)),
+        "MTTR": df["mttr_hours"].map(lambda v: format_hours(v if pd.notnull(v) else None)),
     })
 
 
 def render_asset_registry(conn, profile_df: pd.DataFrame) -> None:
-    from dashboard.utils import get_all_vehicle_metadata
+    from dashboard.utils import get_all_vehicle_metadata, get_fleet_reliability_profile
 
     st.subheader("Asset Registry")
-    st.caption("Make, model, VIN, purchase date, and warranty status for every vehicle in the fleet.")
+    st.caption(
+        "Make, model, VIN, purchase date, warranty status, and reliability "
+        "(MTBF/MTTR) for every vehicle in the fleet."
+    )
 
     metadata_df = get_all_vehicle_metadata(conn)
     if metadata_df.empty:
         st.info("No asset-registry entries yet — reseed the DB to populate the `vehicles` table.")
         return
 
-    view = build_asset_registry_view(metadata_df, profile_df)
+    reliability_df = get_fleet_reliability_profile(conn)
+    view = build_asset_registry_view(metadata_df, profile_df, reliability_df)
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Vehicles", len(view))

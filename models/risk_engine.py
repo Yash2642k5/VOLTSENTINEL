@@ -27,6 +27,7 @@ import pandas as pd
 
 from .anomaly_detector import AnomalyDetector
 from .charging_analyzer import ChargingAnalyzer
+from .data_quality import DataQualityAnalyzer
 from .rul_model import RULModel
 
 
@@ -36,10 +37,12 @@ class RiskEngine:
         rul_model: Optional[RULModel] = None,
         anomaly_detector: Optional[AnomalyDetector] = None,
         charging_analyzer: Optional[ChargingAnalyzer] = None,
+        data_quality_analyzer: Optional[DataQualityAnalyzer] = None,
     ):
         self.rul_model = rul_model or RULModel()
         self.anomaly_detector = anomaly_detector or AnomalyDetector()
         self.charging_analyzer = charging_analyzer or ChargingAnalyzer()
+        self.data_quality_analyzer = data_quality_analyzer or DataQualityAnalyzer()
 
     # ------------------------------------------------------------------
     def _aggregate_thermal(self, conn: sqlite3.Connection) -> pd.DataFrame:
@@ -102,6 +105,8 @@ class RiskEngine:
             concerns += 1
         if row.get("charge_stress_score", 0) >= 60:
             concerns += 1
+        if row.get("is_stale") or row.get("missing_cycle_count", 0) > 0 or row.get("out_of_range_jump_count", 0) > 0:
+            concerns += 1
 
         if concerns >= 3:
             return "high"
@@ -121,7 +126,9 @@ class RiskEngine:
         "total_cycles", "fast_charge_frequency_pct", "mean_dod_pct",
         "high_dod_frequency_pct", "fleet_fast_charge_baseline_pct",
         "fast_charge_vs_baseline_pct", "stress_trend", "charge_stress_score",
-        "suggested_policy", "overall_risk_level",
+        "suggested_policy", "missing_cycle_count", "is_stale",
+        "hours_since_last_reading", "out_of_range_jump_count", "issues",
+        "overall_risk_level",
     ]
 
     def build_fleet_profile(self, conn: sqlite3.Connection) -> pd.DataFrame:
@@ -142,12 +149,14 @@ class RiskEngine:
         thermal_df = self._aggregate_thermal(conn)
         security_df = self._aggregate_security(conn)
         charging_df = self.charging_analyzer.analyze_fleet(conn)
+        data_quality_df = self.data_quality_analyzer.analyze_fleet(conn)
 
         profile = (
             rul_df
             .merge(thermal_df, on="vehicle_id", how="outer")
             .merge(security_df, on="vehicle_id", how="outer")
             .merge(charging_df, on="vehicle_id", how="outer", suffixes=("", "_charging"))
+            .merge(data_quality_df, on="vehicle_id", how="outer", suffixes=("", "_quality"))
         )
 
         profile["overall_risk_level"] = profile.apply(self._overall_risk_level, axis=1)

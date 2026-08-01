@@ -1,17 +1,4 @@
 """
-scripts/seed_db.py
-
-Regenerates data/voltsentinel.db from scratch using the simulator
-pipeline. Run this any time the local/deployed DB is empty or wiped
-(e.g. after a Streamlit Cloud reboot) — this is a stopgap until the
-external-DB migration lands; on Streamlit Community Cloud this file
-will be wiped again on the next reboot/redeploy.
-
-Now also seeds a driver pool and per-vehicle shift assignments
-(Future Roadmap Feature 1) alongside telemetry/tickets/commands, so a
-freshly seeded DB has the "who was driving this vehicle, and when"
-dimension available immediately — no separate migration step needed.
-
 Usage:
     python scripts/seed_db.py
     python scripts/seed_db.py --fleet-size 30 --cycles 300 --seed 42

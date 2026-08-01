@@ -1,14 +1,5 @@
 """
-scripts/junit_to_summary.py
-
-Turns pytest's --junitxml output into a short GitHub-flavored markdown
-summary, printed to stdout. Piped into $GITHUB_STEP_SUMMARY in
-.github/workflows/daily-tests.yml so pass/fail counts and any failing
-test names show up directly on the Actions run page -- no separate
-dashboard needed for the "what happened today" question.
-
-Usage:
-    python scripts/junit_to_summary.py reports/junit.xml
+Usage: python scripts/junit_to_summary.py reports/junit.xml
 """
 
 from __future__ import annotations

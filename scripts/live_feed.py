@@ -1,14 +1,5 @@
 """
-scripts/live_feed.py
-
-Runs indefinitely, appending one new telemetry cycle per vehicle every
-`--interval` seconds, timestamped "now" — simulates a fleet that keeps
-reporting in real time instead of a one-shot historical seed. Point it
-at the same DB the dashboard reads; the dashboard's existing 8-second
-cache TTL picks up the new rows automatically, no extra wiring needed.
-
-Usage (run from the project root, as a module so `ingestion`/`simulator`
-are importable):
+Usage (run from the project root, as a module so `ingestion`/`simulator` are importable):
     python -m scripts.live_feed
     python -m scripts.live_feed --interval 10 --fleet-size 50 --seed 42
     python -m scripts.live_feed --max-ticks 5   # smoke test, then exit

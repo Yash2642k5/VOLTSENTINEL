@@ -1,0 +1,3 @@
+[live_feed] tick 1: inserted 3 readings, 3/3 vehicles active, at 2026-08-01T20:57:54.854886+00:00
+[live_feed] tick 2: inserted 3 readings, 3/3 vehicles active, at 2026-08-01T20:57:54.855596+00:00
+[live_feed] tick 3: inserted 3 readings, 3/3 vehicles active, at 2026-08-01T20:57:54.856269+00:00

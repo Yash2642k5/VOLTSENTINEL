@@ -1,56 +1,7 @@
-"""
-agent/prompts.py
-
-Reasoning prompt templates for the agent decision layer's LLM call
-(agent/decision_engine.py, built next, calls Gemini per the build
-order). This file only builds prompt text and defines the expected
-response schema — it has no API client code and makes no network
-calls, so it has zero dependency on which LLM provider is wired up
-downstream.
-
-Written before decision_engine.py and actions.py on purpose (per the
-build order) so the JSON action schema is decided once here and both
-of those files are built to match it, rather than the schema drifting
-between prompt text and action-handling code.
-
-Design choices, tied directly to the project doc:
-  - The system prompt encodes the Perceive -> Reason -> Decide -> Act
-    framing from §6.1 and the action types + mocked/real functions
-    from §6.2's table, so the model's output vocabulary matches
-    agent/actions.py exactly.
-  - The per-asset prompt passes the ALREADY-COMPUTED signals from
-    models/risk_engine.py (RUL status, thermal counts, security
-    severity, charging stress) rather than raw telemetry — the LLM's
-    job is to weigh pre-scored signals together and decide priority/
-    rationale, not to re-derive anomaly detection itself. Keeps the
-    explainable, rule-based detection logic (§7) separate from the
-    agent's reasoning step (§6), matching the architecture in §5.
-  - A worked few-shot example is included so the model's rationale
-    style stays consistent and auditable across assets, rather than
-    varying with each call.
-
-quarantine_vehicle (added alongside Tier 1/3 real actions in
-agent/actions.py) is included in ACTION_TYPES so the model can impose
-it — but its release counterpart, release_vehicle_quarantine, is
-deliberately NEVER added here. The model must never be given the
-vocabulary to lift a quarantine itself; only a human, from the
-dashboard, can do that. Keeping this asymmetry enforced at the prompt
-level (not just in actions.py's dispatcher) means even a prompt-
-injection-style attempt to get the model to "output" a release action
-still can't produce a valid action_type — _validate_and_normalize in
-decision_engine.py rejects anything outside ACTION_TYPES outright.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-
-# ----------------------------------------------------------------------
-# Action vocabulary — must match agent/actions.py's ACTION_DISPATCH keys
-# exactly. release_vehicle_quarantine is intentionally absent: it is a
-# human-only action, never emittable by the model.
-# ----------------------------------------------------------------------
 ACTION_TYPES = (
     "maintenance_trigger",            # -> create_maintenance_ticket()
     "charge_policy_recommendation",   # -> recommend_charge_policy()
@@ -127,10 +78,7 @@ security_escalation | quarantine_vehicle | fleet_manager_notification | no_actio
   "summary": "<one-sentence overall assessment of this asset>"
 }"""
 
-
-# ----------------------------------------------------------------------
-# Few-shot example — keeps rationale style consistent across the fleet
-# ----------------------------------------------------------------------
+#few shot example
 FEW_SHOT_EXAMPLE_INPUT = """Asset: EVR-0042
 RUL status: degraded (current capacity 76.2% of rated, projected RUL 42 cycles)
 Thermal: 3 anomalies flagged in recent history, 0 critical-temperature readings
@@ -156,15 +104,6 @@ FEW_SHOT_EXAMPLE_OUTPUT = """{
   "summary": "EVR-0042 needs a scheduled maintenance inspection soon due to degraded RUL and recurring thermal anomalies; charging behaviour is mildly elevated but stable and does not need intervention yet."
 }"""
 
-# ----------------------------------------------------------------------
-# Scoped research prompt — the ONLY place in the codebase that permits
-# web search. Deliberately separate from SYSTEM_PROMPT/build_decision_prompt
-# above: those drive decide_for_asset's Perceive->Reason->Decide loop and
-# must stay network-free so every action traces back to an already-computed
-# risk_engine.py signal (see decision_engine.py's module docstring). This
-# prompt is for a narrow, human-triggered "look this up for me" path tied
-# to ONE asset's already-computed profile — not general chat.
-# ----------------------------------------------------------------------
 RESEARCH_ALLOWED_TOPICS = (
     "replacement vehicle/battery-pack models suited to this asset's profile "
     "(e.g. it's flagged for maintenance/replacement)",
@@ -207,9 +146,8 @@ JSON object, no prose before or after, no markdown fences:
 If the query is unanswerable via search, or you find nothing relevant, still return valid \
 JSON: an empty "sources" list and an "answer" that says so plainly."""
 
-# ----------------------------------------------------------------------
 # Per-asset prompt builder
-# ----------------------------------------------------------------------
+
 def build_web_search_prompt(query: str) -> str:
     return f"Query: {query}\n\nOutput:"
 def _fmt(value: Any, suffix: str = "", none_text: str = "unknown") -> str:
@@ -217,9 +155,6 @@ def _fmt(value: Any, suffix: str = "", none_text: str = "unknown") -> str:
 
 
 def build_research_prompt(profile: Dict[str, Any], question: str) -> str:
-    """Pairs the asset's already-computed profile with the human's question,
-    so the model has to ground its search in real signals rather than
-    treating this as an open-ended web-search box."""
     return (
         f"Asset profile:\n{format_asset_profile(profile)}\n\n"
         f"Question: {question}\n\n"
@@ -227,9 +162,6 @@ def build_research_prompt(profile: Dict[str, Any], question: str) -> str:
     )
 
 def format_asset_profile(profile: Dict[str, Any]) -> str:
-    """Turns one row of models/risk_engine.py's merged profile (as a dict)
-    into a readable text block for the prompt — natural-language framing
-    reads more reliably for an LLM than a raw JSON dump of the same data."""
     return (
         f"Asset: {profile.get('vehicle_id', 'UNKNOWN')}\n"
         f"RUL status: {profile.get('status', 'unknown')} "
@@ -249,8 +181,6 @@ def format_asset_profile(profile: Dict[str, Any]) -> str:
 
 
 def build_decision_prompt(profile: Dict[str, Any], include_few_shot: bool = True) -> str:
-    """The full user-turn prompt for a single asset. decision_engine.py sends
-    SYSTEM_PROMPT as the system message and this as the user message."""
     parts = []
 
     if include_few_shot:
@@ -265,9 +195,6 @@ def build_decision_prompt(profile: Dict[str, Any], include_few_shot: bool = True
 
 
 def build_batch_summary_prompt(profiles: list[Dict[str, Any]]) -> str:
-    """Optional fleet-level summary prompt — not per-asset decisions (each
-    asset should get its own build_decision_prompt call for auditability),
-    but useful for a dashboard "fleet health summary" panel."""
     lines = [format_asset_profile(p) for p in profiles]
     joined = "\n\n".join(lines)
     return (
@@ -279,16 +206,6 @@ def build_batch_summary_prompt(profiles: list[Dict[str, Any]]) -> str:
         "for today. Do not restate every asset individually — synthesize."
     )
 
-
-# ----------------------------------------------------------------------
-# Future Roadmap Feature 5 — Driver-Level Coaching. A future
-# agent/driver_coaching_engine.py would wire DRIVER_COACHING_SYSTEM_PROMPT
-# as the system message and build_driver_coaching_prompt(profile) as the
-# user message, mirroring how DecisionEngine wires SYSTEM_PROMPT +
-# build_decision_prompt above. Kept separate from ACTION_TYPES/
-# SYSTEM_PROMPT since a coaching note is advisory text handed to a
-# driver, not one of agent/actions.py's dispatched action types.
-# ----------------------------------------------------------------------
 DRIVER_COACHING_SYSTEM_PROMPT = """You are VoltSentinel's driver-coaching assistant \
 (Future Roadmap Feature 5). A charging-behaviour profile has already been computed for \
 one driver — aggregated across every vehicle they were actually assigned to during their \
@@ -311,10 +228,6 @@ Respond with ONLY a single JSON object, no prose before or after:
 
 
 def format_driver_profile(profile: Dict[str, Any]) -> str:
-    """Turns one row of models/charging_analyzer.py's
-    analyze_fleet_drivers() output (as a dict) into a readable text
-    block, mirroring format_asset_profile()'s per-vehicle framing but
-    for a driver aggregated across however many vehicles they drove."""
     return (
         f"Driver: {profile.get('driver_id', 'UNKNOWN')}\n"
         f"Vehicles driven: {_fmt(profile.get('vehicle_count'), '', '0')}, "
@@ -326,9 +239,5 @@ def format_driver_profile(profile: Dict[str, Any]) -> str:
         f"charge stress score {_fmt(profile.get('charge_stress_score'))}"
     )
 
-
 def build_driver_coaching_prompt(profile: Dict[str, Any]) -> str:
-    """The full user-turn prompt for one driver's aggregated charging
-    profile — DRIVER_COACHING_SYSTEM_PROMPT is the system message, this
-    is the user message, mirroring build_decision_prompt's shape."""
     return f"Input:\n{format_driver_profile(profile)}\n\nOutput:"

@@ -1,36 +1,3 @@
-"""
-agent/bi_chat_engine.py
-
-The "ask the fleet in plain English" surface. Wraps the generic
-agent/tool_chat_engine.py loop with a read-only tool registry
-(agent/bi_tools.py) and a system prompt that defines the expected final
-answer shape (short text + an optional chart spec) — so
-dashboard/components/bi_chat.py can render whatever chart the model
-decides actually fits the question, instead of only ever showing fixed
-default charts.
-
-Deliberately read-only: this engine has no access to agent/actions.py's
-write path at all. The planned incident/security chat reuses the exact
-same tool_chat_engine.py loop, but with a tool registry that also
-exposes actions as *proposals* the fleet manager must explicitly accept
-before anything executes — kept as a clearly separate engine/tool
-registry rather than blurred into this one, so "ask a question about
-the fleet" can never accidentally trigger a write.
-
-Web search: BIChatEngine can optionally reach the open web through
-agent/bi_tools.py's `web_search` tool, backed by a SEPARATE
-GeminiSearchClient (agent/decision_engine.py) — a different client
-object than `client` above, built with its own narrow system prompt
-(BI_WEB_SEARCH_SYSTEM_PROMPT, agent/prompts.py) rather than
-RESEARCH_SYSTEM_PROMPT (which is scoped to the Agent tab's per-asset
-research flow and expects a different response schema). This is
-opt-in: enable_web_search=False by default, matching
-DecisionEngine.create(enable_research=...)'s pattern. When disabled,
-`web_search` is never even registered in the tool catalogue
-build_bi_tools returns (see bi_tools.py), so the model can't call it
-regardless of what the prompt says.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -112,9 +79,6 @@ own telemetry.
 
 
 def _validate_final_answer(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Defensive normalization of the model's final_answer payload — never
-    raises, since a malformed chart spec should just degrade to no chart
-    rather than break the chat turn."""
     text = raw.get("text")
     if not text or not isinstance(text, str):
         text = "(no answer text provided)"
@@ -147,11 +111,6 @@ class BIChatEngine:
         temperature: float = DEFAULT_TEMPERATURE,
         enable_web_search: bool = False,
     ) -> "BIChatEngine":
-        """enable_web_search=False by default — matches
-        DecisionEngine.create(enable_research=...)'s opt-in pattern. Even
-        when True, this only ever populates search_client; the actual
-        on/off switch is whether build_bi_tools() registers the
-        `web_search` tool at all (see bi_tools.py), not prompt wording."""
         client = GeminiClient(
             api_key=api_key, model_name=model_name, temperature=temperature,
             system_instruction=BI_SYSTEM_PROMPT,
@@ -172,14 +131,6 @@ class BIChatEngine:
         question: str,
         chat_history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
-        """chat_history: prior turns in this conversation as
-        [{"role": "user"|"assistant", "text": ...}, ...] — gives the model
-        conversational context ("what about EVR-0002 too?"). Each call still
-        runs its own fresh tool-call loop against the CURRENT conn/
-        profile_df, so answers reflect live data even mid-conversation
-        rather than data snapshotted at conversation start.
-
-        Always returns {"text": str, "chart": dict | None} — never raises."""
         tools = build_bi_tools(conn, profile_df, search_client=self.search_client)
 
         transcript: List[str] = []

@@ -1,20 +1,3 @@
-"""
-agent/auto_alert.py
-
-Fires automatically the moment attack_trigger.py injects a live event —
-no LLM call, no human clicking "Run agent reasoning". Runs the real
-rule-based AnomalyDetector against the vehicle's command history,
-scoped to just the commands that were just injected, and logs a
-security_escalation + fleet_manager_notification via actions.py so it
-shows up in the alert feed on the very next rerun.
-
-Deliberately separate from agent/decision_engine.py's LLM reasoning:
-this is the always-on floor, not a replacement for it. If/when
-decision_engine.py's richer reasoning is available, it can run on top
-of this — but the fleet manager should never be silently unnotified
-just because Gemini is unavailable or slow.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional

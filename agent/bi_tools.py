@@ -1,46 +1,3 @@
-"""
-agent/bi_tools.py
-
-Read-only query tools exposed to the BI chat agent
-(agent/bi_chat_engine.py). Every function here:
-
-  - takes only JSON-serializable arguments (the model supplies these),
-  - NEVER touches agent/actions.py's write path — this is a read-only
-    surface, deliberately separate from anything that changes the
-    fleet, matching the same detect-vs-decide separation the rest of
-    this codebase already keeps (see models/risk_engine.py's docstring),
-  - always returns a JSON-serializable dict, and never raises — bad
-    input comes back as {"error": "..."} so the tool-calling loop can
-    show the model its own mistake and retry, instead of the whole
-    chat turn crashing.
-
-Deliberately has ZERO dependency on dashboard/ or streamlit, even though
-dashboard/utils.py already has similar helpers (fleet_summary_stats,
-etc.) — agent/ has never depended on dashboard/ anywhere else in this
-codebase (it's the other way around), and importing dashboard.utils
-from here would be a reverse dependency for no real benefit. The small
-amount of stats logic below is intentionally re-derived, not imported.
-
-build_bi_tools(conn, profile_df, search_client=None) constructs the
-actual Tool objects for one chat turn, closing over the already-computed
-fleet profile (the dashboard already caches this via
-dashboard/utils.get_fleet_profile, so tools reuse it instead of
-re-fitting RUL for the whole fleet on every single tool call), the live
-DB connection (needed for per-cycle telemetry, which isn't part of the
-aggregate profile), and — optionally — a search_client for the one tool
-that leaves the fleet database entirely.
-
-Web search (`web_search` below) is the ONE tool in this registry that
-touches the network. It's opt-in: build_bi_tools only registers it when
-a search_client is passed in (agent/bi_chat_engine.py's
-BIChatEngine.create(enable_web_search=True)), and even then the model is
-instructed (BI_SYSTEM_PROMPT) to prefer every fleet-database tool first
-and only reach for web_search when the question genuinely needs
-information this system doesn't have — e.g. "what EV models should
-replace EVR-0012" (get_vehicle_metadata has make/model/warranty data,
-not replacement opinions — that's what web_search is for).
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -53,10 +10,6 @@ from agent.decision_engine import GeminiSearchClient, _attempt_json_repair, _str
 from agent.prompts import build_web_search_prompt
 from agent.tool_chat_engine import Tool
 
-# Curated subset of risk_engine's full profile surfaced to the model —
-# deliberately not every internal fitted parameter (fitted_a,
-# fitted_decay_rate, r_squared, ...), matching the same "plain enough to
-# reason over" spirit as dashboard/utils.py's STATUS_PLAIN_LABELS.
 SUMMARY_COLUMNS = [
     "vehicle_id", "status", "overall_risk_level", "current_capacity_pct",
     "rul_cycles", "thermal_anomaly_count", "critical_temp_count",
@@ -86,12 +39,6 @@ def _row_to_summary(row: "pd.Series") -> Dict[str, Any]:
 
 
 def _infer_params(fn: Callable[..., Any]) -> Dict[str, str]:
-    """inspect.signature() returns *string* annotations here (not type
-    objects) because this module has `from __future__ import annotations`
-    (PEP 563) -- so `p.annotation` is already e.g. "str", not the `str`
-    class, and calling .__name__ on it would fail. Handle both forms
-    defensively in case this is ever called against a function from a
-    module without that import."""
     sig = inspect.signature(fn)
     params: Dict[str, str] = {}
     for name, p in sig.parameters.items():
@@ -112,10 +59,6 @@ def build_bi_tools(
     search_client: Optional[GeminiSearchClient] = None,
 ) -> Dict[str, Tool]:
     def get_fleet_summary() -> Dict[str, Any]:
-        """Fleet-wide summary: total vehicle count, risk-level distribution
-        (minimal/low/medium/high counts), how many need maintenance, how
-        many have an active security signal, and the mean charge stress
-        score across the fleet."""
         if profile_df.empty:
             return {"total_vehicles": 0}
         risk_counts = profile_df["overall_risk_level"].value_counts().to_dict()
@@ -133,10 +76,6 @@ def build_bi_tools(
     def list_vehicles(
         status: str = "", risk_level: str = "", security_severity: str = "", limit: int = 50,
     ) -> Dict[str, Any]:
-        """Lists vehicles matching optional filters: status (healthy/watch/
-        degraded/critical), risk_level (minimal/low/medium/high), and/or
-        security_severity (none/low/medium/high). Leave a filter as an
-        empty string to not filter on it."""
         df = profile_df
         if df.empty:
             return {"vehicles": [], "matched": 0}
@@ -150,15 +89,12 @@ def build_bi_tools(
         return {"vehicles": rows, "matched": int(len(df))}
 
     def get_vehicle_profile(vehicle_id: str) -> Dict[str, Any]:
-        """Full risk-profile summary for one vehicle by ID."""
         match = profile_df[profile_df["vehicle_id"] == vehicle_id]
         if match.empty:
             return {"error": f"no vehicle '{vehicle_id}' in the current fleet profile"}
         return _row_to_summary(match.iloc[0])
 
     def compare_vehicles(vehicle_ids: str) -> Dict[str, Any]:
-        """Side-by-side profile summaries for several vehicles at once.
-        vehicle_ids: comma-separated IDs, e.g. 'EVR-0001,EVR-0007'."""
         ids = [v.strip() for v in vehicle_ids.split(",") if v.strip()]
         if not ids:
             return {"error": "no vehicle_ids provided"}
@@ -172,11 +108,6 @@ def build_bi_tools(
         return result
 
     def rank_vehicles(metric: str, ascending: bool = True, limit: int = 10) -> Dict[str, Any]:
-        """Ranks vehicles by one numeric profile metric. metric must be one
-        of: rul_cycles, current_capacity_pct, charge_stress_score,
-        thermal_anomaly_count, mean_dod_pct, fast_charge_frequency_pct,
-        unticketed_command_count. ascending=True means lowest-first (useful
-        for e.g. lowest rul_cycles = most in need of attention)."""
         if metric not in RANKABLE_METRICS:
             return {"error": f"unknown metric '{metric}'. Must be one of: {', '.join(RANKABLE_METRICS)}"}
         if profile_df.empty or metric not in profile_df.columns:
@@ -186,9 +117,6 @@ def build_bi_tools(
         return {"vehicles": rows, "metric": metric, "ascending": ascending}
 
     def get_vehicle_timeseries(vehicle_id: str, metric: str) -> Dict[str, Any]:
-        """Per-cycle history of one telemetry metric for one vehicle. metric
-        must be one of: capacity_pct_of_rated, temperature_c, soc_pct,
-        dod_pct, voltage."""
         if metric not in TIMESERIES_METRICS:
             return {"error": f"unknown metric '{metric}'. Must be one of: {', '.join(TIMESERIES_METRICS)}"}
         from ingestion.db import get_telemetry_for_vehicle
@@ -202,11 +130,6 @@ def build_bi_tools(
         }
 
     def compare_vehicle_timeseries(vehicle_ids: str, metric: str) -> Dict[str, Any]:
-        """Per-cycle history of one telemetry metric across several vehicles
-        at once — use this (not repeated get_vehicle_timeseries calls) when
-        the fleet manager wants a multi-vehicle trend comparison.
-        vehicle_ids: comma-separated, e.g. 'EVR-0001,EVR-0007'. metric: one
-        of capacity_pct_of_rated, temperature_c, soc_pct, dod_pct, voltage."""
         if metric not in TIMESERIES_METRICS:
             return {"error": f"unknown metric '{metric}'. Must be one of: {', '.join(TIMESERIES_METRICS)}"}
         from ingestion.db import get_telemetry_for_vehicle
@@ -226,11 +149,6 @@ def build_bi_tools(
         return result
 
     def get_vehicle_metadata(vehicle_id: str) -> Dict[str, Any]:
-        """Make/model/VIN/purchase-date/warranty-expiry metadata for a
-        vehicle, from the asset registry. Returns an honest 'unavailable'
-        marker (not a fabricated make/model) if this vehicle_id has no
-        registry entry — e.g. a live-injected ID from a DB seeded before
-        the asset registry existed."""
         from ingestion.db import get_vehicle_metadata as _get_vehicle_metadata
 
         row = _get_vehicle_metadata(conn, vehicle_id)
@@ -250,10 +168,6 @@ def build_bi_tools(
         }
 
     def get_reliability_metrics(vehicle_id: str) -> Dict[str, Any]:
-        """MTBF/MTTR (in hours) and maintenance-event counts for one
-        vehicle, computed from agent-flagged maintenance triggers and
-        telemetry timestamps. status is 'insufficient_data' if the
-        vehicle has fewer than 2 maintenance triggers logged."""
         from ingestion.db import get_all_vehicle_ids
         from models.reliability_metrics import ReliabilityAnalyzer
 
@@ -262,16 +176,6 @@ def build_bi_tools(
         return ReliabilityAnalyzer().analyze_vehicle(conn, vehicle_id).to_dict()
 
     def web_search(query: str) -> Dict[str, Any]:
-        """Searches the public web for information the fleet database
-        cannot provide — e.g. replacement EV or battery-pack models,
-        industry specifications, or general battery/charging best
-        practices. ONLY use this when the fleet-data tools above genuinely
-        can't answer the question; never use it for anything already
-        answerable from get_fleet_summary / list_vehicles / get_vehicle_profile
-        / rank_vehicles / get_vehicle_timeseries, and never for questions
-        unrelated to this fleet's operations. Returns {"answer": str,
-        "sources": [str, ...]} on success, or {"error": str} if web search
-        isn't enabled for this session or the search itself failed."""
         if search_client is None:
             return {"error": "web search is not enabled for this session"}
 
@@ -307,11 +211,7 @@ def build_bi_tools(
         rank_vehicles, get_vehicle_timeseries, compare_vehicle_timeseries,
         get_vehicle_metadata, get_reliability_metrics,
     ]
-    # web_search is only ever registered — i.e. only ever visible to the
-    # model as an available tool at all — when a search_client was passed
-    # in. This is the actual on/off switch: an unregistered tool can't be
-    # called regardless of what the system prompt says, so disabling web
-    # search for a session/user doesn't rely on prompt compliance alone.
+
     if search_client is not None:
         fns.append(web_search)
 

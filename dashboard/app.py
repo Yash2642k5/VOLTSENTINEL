@@ -1,62 +1,4 @@
 """
-dashboard/app.py
-
-Streamlit entrypoint. Assembles every component built in Phases 3-5 into
-the single unified operator view described in the project doc's §4.1
-("single unified dashboard combining health, prescriptive, and security
-signals") and §5.1's Presentation row. Last file in the build order —
-it only wires existing pieces together; no new business logic lives here.
-
-Layout:
-    Alert banner — shown right under the header, on every tab, whenever
-              attack_trigger.py has just raised a security escalation
-              (st.session_state["dashboard_alert"]). This is what makes
-              the notification automatic instead of requiring the
-              manager to open the Alert Feed or Agent tab to find out.
-    Sidebar — the live "Simulate Attack" trigger (attack_trigger.py) and
-              a manual refresh button, both reachable regardless of which
-              tab is open, since the attack trigger is the demo's single
-              most important interaction.
-    Tab 1   — Fleet Overview: summary metrics, map, sortable table
-              (fleet_map.py). Selecting a row here is what drives every
-              other tab's "current asset".
-    Tab 2   — Asset Registry: make/model/VIN/purchase date/warranty
-              status for every vehicle (asset_registry.py). NEW.
-    Tab 3   — Fleet BI: default charts (risk mix, RUL distribution,
-              charge-stress vs thermal) plus a chat box wired to
-              agent/bi_chat_engine.py's read-only tool-calling loop —
-              the fleet manager can ask plain-English comparison/ranking/
-              trend questions and get back a chart built from whatever
-              data the agent's tool calls actually returned
-              (bi_chat.py).
-    Tab 4   — Asset Detail: per-asset health/thermal/charging charts
-              (health_chart.py) for whichever vehicle is selected.
-    Tab 5   — Agent: live Perceive->Reason->Decide->Act reasoning and
-              decision history for the selected asset
-              (agent_recommendations.py).
-    Tab 6   — Alert Feed: fleet-wide reverse-chronological ticker of
-              everything the agent has actually logged (alert_feed.py).
-    Tab 7   — Driver Scorecard: charging behaviour re-aggregated by
-              driver_id instead of vehicle_id (Future Roadmap Feature 5,
-              driver_scorecard.py).
-
-Vehicle selection is threaded through st.session_state["fleet_map_vehicle_select"]
-— the same key fleet_map.py's selectbox already writes to — rather than a
-second piece of state here, so there's exactly one source of truth for
-"which asset is currently open," no matter which tab last changed it.
-attack_trigger.py cannot write to that widget key directly (Streamlit
-forbids mutating a widget's key after it's been instantiated in the same
-run), so it stashes the target vehicle under "pending_vehicle_focus"
-instead; main() applies that to the real widget key here, before
-render_fleet_overview() creates the selectbox for this run.
-
-Theming: base theme (dark) is pinned in .streamlit/config.toml, so it
-doesn't depend on a visitor's OS/browser setting. inject_custom_css()
-below builds a genuinely dark UI on top of that — dark card backgrounds,
-light text, and desaturated borders — rather than light-themed cards
-(white backgrounds, dark text) sitting on a dark page, which is what
-produced the half-dark/half-light look before.
-
 Run:
     streamlit run dashboard/app.py
 """
@@ -65,23 +7,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-
-# Streamlit inserts this script's own directory (dashboard/) into sys.path,
-# not the project root — so `from dashboard.components... import ...` below
-# would fail with "No module named 'dashboard'" no matter what directory
-# `streamlit run` is invoked from. Explicitly add the project root (this
-# file's grandparent) before any dashboard.*/models.*/agent.* import.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Load GEMINI_API_KEY (and anything else in .env.example) from a .env file
-# in the project root into the real process environment, BEFORE
-# agent_recommendations.py's get_decision_engine() checks os.environ for it
-# further down in this same import chain. Without this, GEMINI_API_KEY has
-# to be exported in the shell every session — a .env file is the whole
-# point of having .env.example, but nothing was actually loading it.
-# Safe no-op if python-dotenv isn't installed or no .env file exists yet.
 try:
     from dotenv import load_dotenv
 
@@ -107,15 +36,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
-# ----------------------------------------------------------------------
-# Global styling — a genuinely dark UI (dark surfaces, light text) built
-# on top of the "dark" base theme pinned in .streamlit/config.toml.
-# Every surface (page, cards, sidebar, tabs, dataframe, alerts) is given
-# an explicit dark background + light text pair — nothing is left to
-# inherit a light-theme default, which is what caused the half-dark/
-# half-light look previously.
-# ----------------------------------------------------------------------
 DARK_BG = "#0E1420"
 DARK_SURFACE = "#161E2E"
 DARK_SURFACE_ALT = "#1C2536"
@@ -307,10 +227,6 @@ def inject_custom_css() -> None:
         unsafe_allow_html=True,
     )
 
-
-# ----------------------------------------------------------------------
-# Header
-# ----------------------------------------------------------------------
 def render_header() -> None:
     st.title("\U0001F50B Welcome Fleet Manager (id: 1234)")
     st.caption(
@@ -319,23 +235,13 @@ def render_header() -> None:
     st.markdown(f"<hr style='margin-top:0.4rem;margin-bottom:1.2rem;border-color:{DARK_BORDER};'>",
                 unsafe_allow_html=True)
 
-
-# ----------------------------------------------------------------------
-# Automatic attack notification banner — visible on every tab, no click
-# required. Set by attack_trigger.py right after a live attack is
-# injected and successfully flagged by the rule-based detector. Cleared
-# either by the Dismiss button here, or by a manual "Refresh data" click
-# in the sidebar (see render_sidebar) — both paths clear the SAME two
-# keys (dashboard_alert + map_focus_vehicle) together, so the banner and
-# the highlighted map/table row never fall out of sync with each other.
-# ----------------------------------------------------------------------
 def render_dashboard_alert_banner() -> None:
     alert = st.session_state.get("dashboard_alert")
     if not alert:
         return
 
     st.error(
-        f"🚨 **Unauthorized battery command detected on {alert['vehicle_id']}.** "
+        f"**Unauthorized battery command detected on {alert['vehicle_id']}.** "
         f"{alert['rationale']}",
         icon="🚨",
     )
@@ -345,19 +251,11 @@ def render_dashboard_alert_banner() -> None:
         st.session_state.pop("map_focus_vehicle", None)
         st.rerun()
 
-
-# ----------------------------------------------------------------------
-# Sidebar — always-available controls, independent of the active tab
-# ----------------------------------------------------------------------
 def render_sidebar(conn, default_vehicle_id) -> None:
     with st.sidebar:
-        st.header("⚙️ Controls")
+        st.header("CONTROLS")
 
-        if st.button("🔄 Refresh data", key="sidebar_refresh"):
-            # Clear BOTH keys together — clearing only map_focus_vehicle
-            # would remove the red highlight from the map/table but leave
-            # the banner (driven by dashboard_alert) showing, so the two
-            # would fall out of sync on a plain refresh.
+        if st.button("Refresh data", key="sidebar_refresh"):
             st.session_state.pop("map_focus_vehicle", None)
             st.session_state.pop("dashboard_alert", None)
             clear_all_caches()
@@ -371,15 +269,7 @@ def render_sidebar(conn, default_vehicle_id) -> None:
         st.divider()
         render_attack_trigger(conn, default_vehicle_id=default_vehicle_id)
 
-
-# ----------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------
 def main() -> None:
-    # Apply any pending post-attack vehicle focus BEFORE fleet_map.py's
-    # selectbox (key "fleet_map_vehicle_select") is instantiated this run —
-    # setting a widget's key after it's already rendered raises
-    # StreamlitAPIException, so this has to happen first, not in the sidebar.
     if "pending_vehicle_focus" in st.session_state:
         st.session_state["fleet_map_vehicle_select"] = st.session_state.pop("pending_vehicle_focus")
 
@@ -391,18 +281,13 @@ def main() -> None:
 
     tab_fleet, tab_registry, tab_bi, tab_asset, tab_agent, tab_alerts, tab_drivers = st.tabs(
         [
-            "🚗 Fleet Overview", "🗂️ Asset Registry", "📊 Fleet BI", "🔋 Asset Detail",
-            "🤖 Agent", "🔔 Alert Feed", "🧑‍✈️ Driver Scorecard",
+            " FLEET OVERVIEW", "ASSETS", "FLEET BI", "ASSET DETAIL",
+            "AGENT REASONING", "ALERT FEED", "DRIVER",
         ]
     )
 
     with tab_fleet:
         profile_df, selected_vehicle_id = render_fleet_overview(conn)
-
-    # fleet_map.py's selectbox (key "fleet_map_vehicle_select") is the single
-    # source of truth for the current asset — read it back here so tabs 2-5
-    # and the sidebar all agree on the same selection even though only
-    # tab_fleet's body actually rendered the picker widget.
     selected_vehicle_id = st.session_state.get("fleet_map_vehicle_select", selected_vehicle_id)
 
     with tab_registry:

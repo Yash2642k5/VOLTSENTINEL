@@ -1,56 +1,3 @@
-"""
-dashboard/components/fleet_map.py
-
-Fleet-wide overview: top-level summary metrics, a sortable per-asset
-table, and a geographic map of each vehicle's last-known position
-(from its most recent BMS command) color-coded by overall_risk_level.
-
-Same split as health_chart.py:
-    - build_*(...) functions are pure (no st.* calls) so the geometry/
-    color logic is testable without a running Streamlit app.
-    - render_fleet_overview(...) is the page section app.py calls; it's
-    the only function here that touches st.*, and it returns the
-    vehicle_id the user selected so app.py can feed it straight into
-    health_chart.render_health_chart() / agent_recommendations.py.
-
-Uses pydeck for the map (bundled with Streamlit as a dependency of
-st.pydeck_chart) rather than st.map's newer color= parameter, since
-pydeck's ScatterplotLayer API has been stable for a long time and
-doesn't depend on the caller being on a very recent Streamlit version.
-
-Table columns use layman-friendly labels (e.g. "Battery Status" instead
-of "RUL Status") since the primary audience — fleet managers — isn't
-expected to know APM/battery-engineering jargon. The map also honours
-st.session_state["map_focus_vehicle"], set by attack_trigger.py right
-after an attack is injected, so the map automatically zooms to the
-affected vehicle instead of requiring the manager to find it manually.
-The same session key is used to highlight that vehicle's row in the
-fleet table in red, so it's visually unmistakable in both places.
-
-Driver column (Future Roadmap Feature 1): build_fleet_table_view()
-takes an optional driver_by_vehicle lookup (dashboard/utils.py's
-get_current_drivers_by_vehicle()) and surfaces the vehicle's current
-driver's name as a plain "Driver" column, right after "Vehicle" — no
-new dashboard tab or picker yet, since the roadmap's own proposed shape
-for this feature is exactly "a Driver column in the sortable fleet
-view." A vehicle with no assignment history yet (e.g. an older seeded
-DB) shows "Unassigned" rather than blank/None, matching this file's
-existing "always show something explainable, never a bare null" style.
-
-Live SoC / range (Future Roadmap Feature 2): build_fleet_table_view()
-also takes an optional range_df (dashboard/utils.py's
-get_fleet_range_estimates()) and surfaces "SoC" / "Est. Range" columns.
-build_vehicle_scatter_data() additionally uses range_df to draw a
-distinct red RING around any vehicle currently at risk of stranding —
-kept as a separate visual channel from the existing risk-level FILL
-color, so a vehicle can be flagged "high risk" and/or "stranding risk"
-without one signal masking the other. render_fleet_summary_metrics()
-adds a fifth "Stranding Risk" tile alongside the existing four. All
-three degrade gracefully (fall back to "—" / no ring / a 0 count) when
-range_df is omitted, matching driver_by_vehicle's existing fallback
-convention.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -90,19 +37,12 @@ ATTACKED_ROW_STYLE = "background-color: #4A1420; color: #FF8A80; font-weight: 70
 
 UNASSIGNED_DRIVER_LABEL = "Unassigned"
 
-# Live SoC / range (Future Roadmap Feature 2) — a distinct ring color/
-# width from the fill color already used for overall_risk_level, so
-# "high risk" and "stranding risk" stay visually independent signals.
 STRANDING_RISK_RING_COLOR = [255, 82, 82, 255]   # bright red ring
 NORMAL_RING_COLOR = [255, 255, 255, 255]
 STRANDING_RISK_LINE_WIDTH = 3
 NORMAL_LINE_WIDTH = 1
 
-# Live vehicle state (scripts/live_feed.py) — inactive vehicles get a
-# dimmer marker (lower alpha) rather than a different color, so
-# overall_risk_level's fill color stays the one consistent "what color
-# means what" signal across the whole dashboard.
-ACTIVITY_STATUS_LABELS = {"active": "🟢 Active", "inactive": "⚪ Inactive"}
+ACTIVITY_STATUS_LABELS = {"active": "🟢 ACTIVE", "inactive": "⚪ INACTIVE"}
 ACTIVE_MARKER_ALPHA = 200
 INACTIVE_MARKER_ALPHA = 90
 
@@ -112,10 +52,6 @@ def _hex_to_rgba(hex_color: str, alpha: int = 200) -> List[int]:
     r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     return [r, g, b, alpha]
 
-
-# ----------------------------------------------------------------------
-# Summary metrics + risk distribution
-# ----------------------------------------------------------------------
 def render_fleet_summary_metrics(
     profile_df: pd.DataFrame, range_df: Optional[pd.DataFrame] = None
 ) -> None:
@@ -146,36 +82,12 @@ def render_fleet_summary_metrics(
     )
     st.markdown(f"<div style='margin-top:6px;'>{badges}</div>", unsafe_allow_html=True)
 
-
-# ----------------------------------------------------------------------
-# Sortable asset table + selection
-# ----------------------------------------------------------------------
 def build_fleet_table_view(
     profile_df: pd.DataFrame,
     driver_by_vehicle: Optional[Dict[str, Dict[str, Any]]] = None,
     range_df: Optional[pd.DataFrame] = None,
     live_state_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Pure transform: picks/renames/formats the columns worth showing
-    in the fleet table, in a fixed risk-descending sort so the assets
-    that most need attention are always at the top. Column labels are
-    plain-English on purpose — this table is what a non-technical fleet
-    manager looks at first.
-
-    driver_by_vehicle: optional {vehicle_id: {"name": ..., ...}} lookup
-    (dashboard/utils.get_current_drivers_by_vehicle()) — when omitted,
-    every row's "Driver" column reads "Unassigned" rather than the
-    column being dropped entirely, so callers/tests that don't pass it
-    still get a stable, predictable shape.
-
-    range_df: optional output of models.range_estimator.RangeEstimator
-    .estimate_fleet() / dashboard.utils.get_fleet_range_estimates() —
-    when omitted, "SoC" / "Est. Range" read "—" rather than the columns
-    being dropped, matching driver_by_vehicle's fallback convention.
-
-    live_state_df: optional dashboard.utils.get_fleet_live_state() output
-    — when omitted (or a vehicle is absent from it, e.g. the live feed
-    hasn't run yet), "Activity" reads "—" rather than being dropped."""
     if profile_df.empty:
         return profile_df
 
@@ -219,11 +131,6 @@ def build_fleet_table_view(
 
 
 def _style_attacked_row(row: pd.Series, attacked_vehicle_id: Optional[str]) -> List[str]:
-    """Returns a per-cell style list for one row of the fleet table —
-    every cell in the currently-attacked vehicle's row gets a red
-    highlight, so it's impossible to miss even if the manager isn't
-    looking at the map or alert feed. No-op (empty style) for every
-    other row."""
     if attacked_vehicle_id and row.get("Vehicle") == attacked_vehicle_id:
         return [ATTACKED_ROW_STYLE] * len(row)
     return [""] * len(row)
@@ -235,9 +142,6 @@ def render_fleet_table(
     range_df: Optional[pd.DataFrame] = None,
     live_state_df: Optional[pd.DataFrame] = None,
 ) -> Optional[str]:
-    """Renders the table and a vehicle picker below it. Returns the
-    selected vehicle_id (or None if the fleet is empty) — app.py uses
-    this to decide which asset's detail views to render."""
     if profile_df.empty:
         st.info("No vehicles in the fleet profile yet.")
         return None
@@ -246,10 +150,6 @@ def render_fleet_table(
         profile_df, driver_by_vehicle=driver_by_vehicle, range_df=range_df, live_state_df=live_state_df
     )
 
-    # attack_trigger.py sets this the moment a live attack is injected —
-    # reused here (same key fleet_map.py's map view already reads) so the
-    # table and map both point at the same vehicle without a second
-    # source of truth.
     attacked_vehicle_id = st.session_state.get("map_focus_vehicle")
 
     styled_view = view.style.apply(_style_attacked_row, attacked_vehicle_id=attacked_vehicle_id, axis=1)
@@ -257,30 +157,22 @@ def render_fleet_table(
 
     export_col1, export_col2 = st.columns(2)
     export_col1.download_button(
-        "⬇️ Export Excel", data=export_dataframe_to_excel(view, sheet_name="Fleet"),
+        "EXPORT EXCEL", data=export_dataframe_to_excel(view, sheet_name="Fleet"),
         file_name="voltsentinel_fleet_report.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     export_col2.download_button(
-        "⬇️ Export PDF", data=export_dataframe_to_pdf(view, title="VoltSentinel Fleet Report"),
+        "EXPORT PDF", data=export_dataframe_to_pdf(view, title="VoltSentinel Fleet Report"),
         file_name="voltsentinel_fleet_report.pdf", mime="application/pdf",
     )
 
     if attacked_vehicle_id and attacked_vehicle_id in view["Vehicle"].values:
-        st.caption(f"🔴 **{attacked_vehicle_id}** is highlighted — unauthorized command detected.")
+        st.caption(f"**{attacked_vehicle_id}** is highlighted — unauthorized command detected.")
 
     vehicle_ids = view["Vehicle"].tolist()  # already risk-sorted, so the default is the most urgent asset
     return st.selectbox("Inspect asset", vehicle_ids, key="fleet_map_vehicle_select")
 
-
-# ----------------------------------------------------------------------
-# Map
-# ----------------------------------------------------------------------
 def _merge_live_locations(locations_df: pd.DataFrame, live_state_df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Prefers live_state_df's continuously-updated position/activity for
-    a vehicle when present, falling back to locations_df's command-
-    derived last-known position for vehicles the live feed hasn't
-    touched yet (or hasn't run at all)."""
     if live_state_df is None or live_state_df.empty:
         base = locations_df.copy()
         base["activity_status"] = None
@@ -301,16 +193,6 @@ def build_vehicle_scatter_data(
     range_df: Optional[pd.DataFrame] = None,
     live_state_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Merges current location with risk level (fill color) and,
-    when range_df is supplied, stranding-risk status (ring color/width)
-    — pure data prep, no pydeck/streamlit objects, so this is
-    straightforward to unit test.
-
-    Fill color still encodes overall_risk_level exactly as before; the
-    ring around each marker is the independent stranding-risk channel.
-    live_state_df (scripts/live_feed.py's output) additionally dims
-    inactive vehicles' markers (lower fill alpha) rather than changing
-    their color, so risk-level color stays the one consistent signal."""
     base = _merge_live_locations(locations_df, live_state_df)
     if base.empty:
         return base
@@ -387,12 +269,6 @@ def build_vehicle_layer(scatter_df: pd.DataFrame) -> pdk.Layer:
 
 
 def _initial_view_state(scatter_df: pd.DataFrame) -> pdk.ViewState:
-    """Zooms to the just-attacked vehicle when
-    st.session_state["map_focus_vehicle"] is set (attack_trigger.py sets
-    this right after injecting an attack), so the fleet manager sees the
-    affected vehicle immediately instead of having to hunt for it on a
-    fleet-wide view. Falls back to the normal fleet-wide average view
-    otherwise."""
     focus_vehicle = st.session_state.get("map_focus_vehicle")
     if focus_vehicle and not scatter_df.empty:
         match = scatter_df[scatter_df["vehicle_id"] == focus_vehicle]
@@ -446,15 +322,7 @@ def render_fleet_map(
     else:
         st.caption("Dark gray markers are depot locations. Red ring = low SoC/range. Dim marker = inactive.")
 
-
-# ----------------------------------------------------------------------
-# Top-level entrypoint — the only function app.py needs to call
-# ----------------------------------------------------------------------
 def render_fleet_overview(conn) -> Tuple[pd.DataFrame, Optional[str]]:
-    """Renders summary metrics, the map, and the asset table in one
-    section. Returns (profile_df, selected_vehicle_id) so app.py can
-    reuse the already-fetched profile for the detail views below
-    instead of re-querying it."""
     profile_df = get_fleet_profile(conn)
     driver_by_vehicle = get_current_drivers_by_vehicle(conn)
     range_df = get_fleet_range_estimates(conn)

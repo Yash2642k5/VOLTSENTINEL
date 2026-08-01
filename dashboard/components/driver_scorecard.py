@@ -1,23 +1,3 @@
-"""
-dashboard/components/driver_scorecard.py
-
-Driver Scorecard tab (Future Roadmap Feature 5 — Driver-Level
-Coaching). Re-aggregates charging behaviour by driver_id instead of
-vehicle_id (models/charging_analyzer.py's analyze_fleet_drivers(),
-built on top of Feature 1's vehicle_assignments), so two drivers
-rotating through the same vehicle are scored separately instead of
-being blended into one vehicle-level signal.
-
-Same split as every other dashboard/components/*.py file:
-    - build_driver_scorecard_view(...) -- pure, no st.*.
-    - render_driver_scorecard(...)     -- the only function here
-      touching st.*.
-
-Depends on Feature 1's drivers/vehicle_assignments tables already being
-populated -- a DB seeded before that feature existed just shows "no
-driver assignment history yet" rather than erroring.
-"""
-
 from __future__ import annotations
 
 import pandas as pd
@@ -26,18 +6,14 @@ import streamlit as st
 from dashboard.utils import format_pct
 
 STRESS_TREND_LABELS = {
-    "increasing": "⚠️ Worsening",
-    "decreasing": "✅ Improving",
-    "stable": "Stable",
-    "insufficient_data": "Not enough data yet",
+    "increasing": "DECLINE",
+    "decreasing": "IMPORVEMENT",
+    "stable": "STABLE",
+    "insufficient_data": "NOT ENOUGH DATA",
 }
 
 
 def build_driver_scorecard_view(driver_profile_df: pd.DataFrame) -> pd.DataFrame:
-    """Pure transform: plain-English columns, sorted worst-charge-stress
-    first so the drivers most worth a coaching conversation are at the
-    top -- mirrors fleet_map.py's build_fleet_table_view() risk-first
-    sort."""
     if driver_profile_df.empty:
         return driver_profile_df
 

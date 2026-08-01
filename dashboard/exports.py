@@ -1,6 +1,3 @@
-"""Excel/PDF export of any dashboard table DataFrame — pure functions
-(no st.* calls), so download buttons in components/*.py stay one line."""
-
 from __future__ import annotations
 
 from io import BytesIO

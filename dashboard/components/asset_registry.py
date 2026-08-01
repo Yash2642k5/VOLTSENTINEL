@@ -1,5 +1,3 @@
-"""Asset Registry tab — make/model/VIN/purchase date/warranty status per vehicle."""
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -98,11 +96,11 @@ def render_asset_registry(conn, profile_df: pd.DataFrame) -> None:
 
     export_col1, export_col2 = st.columns(2)
     export_col1.download_button(
-        "⬇️ Export Excel", data=export_dataframe_to_excel(view, sheet_name="Asset Registry"),
+        "EXPORT EXCEL", data=export_dataframe_to_excel(view, sheet_name="Asset Registry"),
         file_name="voltsentinel_asset_registry.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     export_col2.download_button(
-        "⬇️ Export PDF", data=export_dataframe_to_pdf(view, title="VoltSentinel Asset Registry"),
+        "EXPORT PDF", data=export_dataframe_to_pdf(view, title="VoltSentinel Asset Registry"),
         file_name="voltsentinel_asset_registry.pdf", mime="application/pdf",
     )

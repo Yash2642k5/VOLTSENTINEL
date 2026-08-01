@@ -1,26 +1,3 @@
-"""
-dashboard/components/alert_feed.py
-
-Fleet-wide "live alert feed" (project doc §5.1's Presentation row):
-a reverse-chronological ticker of everything agent/decision_engine.py
-has logged via agent/actions.py. Distinct from agent_recommendations.py,
-which shows one asset's full reasoning; this shows the fleet-wide stream
-of what the agent has actually done, most recent first.
-
-Same split as the other components:
-    - build_alert_feed_view(...) is a pure transform (filter/sort/slice),
-    testable without a running Streamlit app.
-    - render_alert_card(...) / render_alert_feed(...) are the only
-    functions here that call st.*.
-
-Excludes action_type == "no_action" by default — those are logged for
-audit completeness (agent/actions.py's docstring: "a decision is still
-a decision"), but a live demo feed showing "EVR-0004: nothing to do"
-repeatedly would bury the events that actually matter. exclude_no_action
-is a parameter, not a hardcoded choice, so a "show everything" toggle
-is one line away in app.py if wanted later.
-"""
-
 from __future__ import annotations
 
 import json
@@ -48,10 +25,6 @@ ACTION_TYPE_ICONS: Dict[str, str] = {
 
 DEFAULT_MAX_ITEMS = 25
 
-
-# ----------------------------------------------------------------------
-# Pure data prep
-# ----------------------------------------------------------------------
 def build_alert_feed_view(
     actions_df: pd.DataFrame,
     max_items: int = DEFAULT_MAX_ITEMS,
@@ -59,9 +32,6 @@ def build_alert_feed_view(
     action_type_filter: Optional[List[str]] = None,
     vehicle_filter: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Filters, sorts newest-first, and caps the feed. All filters are
-    optional — passing None means 'no restriction on this dimension',
-    not 'match nothing', so callers can apply only the filters they need."""
     if actions_df.empty:
         return actions_df
 
@@ -87,8 +57,6 @@ def priority_counts(actions_df: pd.DataFrame) -> Dict[str, int]:
 
 
 def _parse_parameters(raw: Any) -> Dict[str, Any]:
-    """agent/actions.py stores parameters as a JSON string (json.dumps
-    before the sqlite insert) — this undoes that for display."""
     if isinstance(raw, dict):
         return raw
     if not raw:
@@ -99,10 +67,6 @@ def _parse_parameters(raw: Any) -> Dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         return {}
 
-
-# ----------------------------------------------------------------------
-# Rendering
-# ----------------------------------------------------------------------
 def render_priority_summary(actions_df: pd.DataFrame) -> None:
     counts = priority_counts(actions_df)
     badges = " ".join(
@@ -139,10 +103,6 @@ def render_alert_card(row: Dict[str, Any]) -> None:
         with st.expander("Details", expanded=False):
             st.json(parameters)
 
-
-# ----------------------------------------------------------------------
-# Top-level entrypoint — the only function app.py needs to call
-# ----------------------------------------------------------------------
 def render_alert_feed(
     conn,
     max_items: int = DEFAULT_MAX_ITEMS,

@@ -1,41 +1,3 @@
-"""
-dashboard/components/attack_trigger.py
-
-The live "Simulate Attack" demo trigger (project doc §5.1's Presentation
-row, §8's "allows the live demo to trigger a realistic scenario on
-demand"). Distinct from simulator/attack_injector.py, which generates a
-whole fleet's worth of attack commands anchored to a *simulated historical*
-time window for batch runs — this component injects ONE scenario's worth
-of unauthorized BMS command(s) anchored to *now*, directly into the live
-SQLite DB, so the fleet map, alert feed, and agent recommendations panel
-all react to it on the very next rerun.
-
-Reuses attack_injector.py's mechanics and simulator/config.py's tuned
-parameters (GPS jitter degrees, burst count/window) rather than
-hand-picking new magic numbers here — the injected traffic should look
-like the same Tirri Challenge pattern the rest of the system was tuned
-against, just fired on demand instead of at a random point in a 500-cycle
-history.
-
-Writes straight through ingestion/db.py's insert_command_batch (same
-idempotent insert path routes.py's REST/WS endpoints use), validated
-through ingestion/schemas.py first — so an injected demo command can
-never reach SQLite in a shape the rest of the pipeline wouldn't accept
-from a real client.
-
-Three-step split, matching agent_recommendations.py's "preview vs commit"
-pattern:
-    build_attack_commands(...)     -> pure, no st.*, no DB writes. Testable.
-    inject_attack(...)             -> validates + writes + returns count.
-    inject_attack_and_notify(...)  -> writes + immediately raises the
-                                       rule-based escalation/notification
-                                       (agent/auto_alert.py), so the fleet
-                                       manager is notified automatically —
-                                       not only when someone opens the
-                                       Agent tab and clicks a button.
-    render_attack_trigger(...)     -> the only function here that touches st.*.
-"""
-
 from __future__ import annotations
 
 import random
@@ -52,11 +14,6 @@ from models.anomaly_detector import DEFAULT_DEPOT_LOCATIONS
 from simulator.config import default_config
 from agent.auto_alert import notify_fleet_manager_of_attack
 
-# ----------------------------------------------------------------------
-# Scenario definitions — each maps directly to one of the §7.1 signals
-# (no ticket, GPS mismatch, frequency spike) so the detector's reaction
-# to each button press is explainable in the demo narrative.
-# ----------------------------------------------------------------------
 SCENARIOS: Dict[str, str] = {
     "no_ticket_gps_mismatch": "Unauthorized command, vehicle in motion (classic Tirri Challenge)",
     "no_ticket_at_depot": "Unauthorized command, GPS at a depot (no-ticket signal alone)",
@@ -65,15 +22,7 @@ SCENARIOS: Dict[str, str] = {
 
 DEFAULT_SCENARIO = "no_ticket_gps_mismatch"
 
-
-# ----------------------------------------------------------------------
-# Pure builders — no st.*, no DB access. Mirrors attack_injector.py's
-# _single_attack_command / _generate_vehicle_attacks mechanics.
-# ----------------------------------------------------------------------
 def _random_road_coords() -> Tuple[float, float]:
-    """A depot as a rough regional anchor, jittered far enough away to
-    represent 'in motion on a public road' — same idea as
-    attack_injector.AttackInjector._random_road_coords()."""
     depot = random.choice(DEFAULT_DEPOT_LOCATIONS)
     jitter = default_config.attack_road_gps_jitter_deg
     lat = depot[0] + random.uniform(-jitter, jitter)
@@ -82,9 +31,6 @@ def _random_road_coords() -> Tuple[float, float]:
 
 
 def _depot_coords() -> Tuple[float, float]:
-    """GPS exactly at a depot but still with no ticket — isolates the
-    no_ticket_flag signal on its own, without gps_mismatch_flag also
-    firing, per attack_injector.py's 'keeps the detector honest' comment."""
     depot = random.choice(DEFAULT_DEPOT_LOCATIONS)
     return round(depot[0], 6), round(depot[1], 6)
 
@@ -99,17 +45,11 @@ def _build_attack_command(vehicle_id: str, timestamp: datetime, at_depot: bool) 
         "latitude": lat,
         "longitude": lon,
         "ticket_id": None,
-        # Ground-truth marker only — same convention as attack_injector.py.
-        # The anomaly detector must never read this field; it exists purely
-        # so a later "was this flagged correctly?" check could use it.
         "is_attack": True,
     }
 
 
 def build_attack_commands(vehicle_id: str, scenario: str) -> List[Dict[str, Any]]:
-    """Builds the raw command dict(s) for one scenario, anchored to now.
-    Does not touch the DB — kept separate so this is unit-testable
-    without a live sqlite connection or a running Streamlit app."""
     now = datetime.now(timezone.utc)
     cfg = default_config
 
@@ -125,52 +65,22 @@ def build_attack_commands(vehicle_id: str, scenario: str) -> List[Dict[str, Any]
             commands.append(_build_attack_command(vehicle_id, ts, at_depot=False))
         return commands
 
-    # Default / "no_ticket_gps_mismatch": the classic single Tirri Challenge event.
     return [_build_attack_command(vehicle_id, now, at_depot=False)]
 
-
-# ----------------------------------------------------------------------
-# DB write path — validates through schemas.py, inserts via db.py
-# ----------------------------------------------------------------------
 def inject_attack(conn, vehicle_id: str, scenario: str) -> int:
-    """Builds, validates, and writes the scenario's command(s). Returns
-    the number of rows actually inserted (insert_command_batch already
-    de-dupes on the command_id primary key, so this also matches the
-    idempotency guarantee the rest of the ingestion layer relies on).
-
-    Kept as a pure validated-write path (no notification side effects)
-    since tests and other callers rely on this exact behaviour."""
     raw_commands = build_attack_commands(vehicle_id, scenario)
     validated = [CommandEvent(**c) for c in raw_commands]
     return insert_command_batch(conn, validated)
 
 
 def inject_attack_and_notify(conn, vehicle_id: str, scenario: str):
-    """UI entrypoint: builds + validates + writes the attack commands,
-    then immediately raises the rule-based escalation/notification for
-    them (agent/auto_alert.py) — so the fleet manager is notified the
-    moment the attack lands, without needing to open the Agent tab and
-    click "Run agent reasoning". inject_attack() itself stays untouched
-    as the pure validated-write path other callers/tests rely on.
-
-    Returns (inserted_count, escalation_record_or_None).
-    """
     raw_commands = build_attack_commands(vehicle_id, scenario)
     validated = [CommandEvent(**c) for c in raw_commands]
     inserted = insert_command_batch(conn, validated)
     escalation = notify_fleet_manager_of_attack(conn, vehicle_id, raw_commands)
     return inserted, escalation
 
-
-# ----------------------------------------------------------------------
-# Top-level entrypoint — the only function app.py needs to call
-# ----------------------------------------------------------------------
 def render_attack_trigger(conn, default_vehicle_id: Optional[str] = None) -> None:
-    """Renders the vehicle/scenario picker and the trigger button.
-    default_vehicle_id lets app.py pre-select whichever asset is
-    currently open in the detail view (from fleet_map.py's selection),
-    so the demo can attack "the vehicle we're already looking at" in
-    one click instead of two."""
     st.subheader("Simulate Attack")
     st.caption(
         "Injects a live, Tirri Challenge-style unauthorized BMS command for the "
@@ -201,14 +111,6 @@ def render_attack_trigger(conn, default_vehicle_id: Optional[str] = None) -> Non
 
     if st.button("🚨 Simulate Attack", key="attack_trigger_button", type="primary"):
         inserted, escalation = inject_attack_and_notify(conn, vehicle_id, scenario)
-
-        # Don't write to "fleet_map_vehicle_select" directly — that widget
-        # may already have been instantiated earlier in this same run
-        # (Fleet Overview tab renders before the sidebar), and Streamlit
-        # forbids mutating a widget's key after it's been created in the
-        # same run. Stash it under a plain key instead; app.py applies it
-        # to the widget key at the top of the NEXT run, before the
-        # selectbox exists yet.
         st.session_state["pending_vehicle_focus"] = vehicle_id
         st.session_state["map_focus_vehicle"] = vehicle_id
 

@@ -1,38 +1,3 @@
-"""
-dashboard/components/bi_chat.py
-
-The "ask the fleet in plain English" tab: a few always-on default
-charts (fleet risk mix, RUL distribution, charge-stress vs thermal
-scatter) plus a chat box wired to agent/bi_chat_engine.py's read-only
-tool-calling loop. The fleet manager can ask for comparisons, rankings,
-or trends in plain English and get back a short answer plus, when the
-question is comparative/trend-based, a chart built from whatever data
-the agent's tool calls actually returned — the chart type and fields
-come from the model's own answer (agent/bi_chat_engine.py's chart
-spec), not a fixed chart per query.
-
-Same split as every other dashboard/components/*.py file:
-    - build_*_chart(...)      -- pure, alt.Chart-returning, no st.*.
-    - build_chart_from_spec() -- same, but for the agent's dynamic spec
-    instead of a fixed dataset.
-    - render_bi_chat(...)     -- the only function here touching st.*.
-
-Read-only by design: this tab has no access to agent/actions.py's write
-path (see agent/bi_chat_engine.py's docstring) — it can tell the fleet
-manager what it found, never change anything in the fleet.
-
-Web search: enabled via BIChatEngine.create(enable_web_search=True) below,
-so the agent's `web_search` tool (agent/bi_tools.py) is actually registered
-for this session. Without that flag, BIChatEngine.create() defaults to
-enable_web_search=False, search_client stays None, and build_bi_tools()
-never registers `web_search` at all — the model simply never sees it as
-an available tool, regardless of the system prompt. Note this uses a
-SEPARATE Gemini call path (GeminiSearchClient, with Google Search
-grounding registered as a tool) from the main chat client, so it's an
-additional cost surface, not free — and depends on your GEMINI_API_KEY's
-plan supporting search grounding.
-"""
-
 from __future__ import annotations
 
 import os
@@ -46,11 +11,6 @@ from dashboard.utils import RISK_LEVEL_COLORS, RISK_LEVEL_ORDER, risk_level_labe
 
 CHAT_HISTORY_KEY = "bi_chat_history"
 
-
-# ----------------------------------------------------------------------
-# Cached engine -- one Gemini client per session, mirrors
-# agent_recommendations.py's get_decision_engine() pattern exactly.
-# ----------------------------------------------------------------------
 @st.cache_resource
 def get_bi_chat_engine():
     from agent.bi_chat_engine import BIChatEngine
@@ -58,21 +18,10 @@ def get_bi_chat_engine():
     if not os.environ.get("GEMINI_API_KEY"):
         return None
     try:
-        # enable_web_search=True: registers agent/bi_tools.py's `web_search`
-        # tool (backed by a separate GeminiSearchClient with Google Search
-        # grounding) so the BI chat agent can actually reach the open web
-        # for questions the fleet database can't answer (e.g. "what EV
-        # models should replace EVR-0012"). See BI_SYSTEM_PROMPT in
-        # agent/prompts.py for how the model is instructed to prefer
-        # fleet-data tools first and only fall back to web_search when needed.
         return BIChatEngine.create(enable_web_search=True)
     except Exception as e:
         st.error(str(e)); return None
 
-
-# ----------------------------------------------------------------------
-# Default charts -- pure builders, no st.*
-# ----------------------------------------------------------------------
 def build_risk_mix_chart(profile_df: pd.DataFrame) -> alt.Chart:
     counts = profile_df["overall_risk_level"].value_counts()
     data = pd.DataFrame({
@@ -136,16 +85,7 @@ def render_default_charts(profile_df: pd.DataFrame) -> None:
     st.altair_chart(build_stress_vs_thermal_chart(profile_df), use_container_width=True)
 
 
-# ----------------------------------------------------------------------
-# Dynamic chart -- built from whatever spec the agent's final_answer
-# returned (agent/bi_chat_engine.py's CHART_TYPES: bar/line/scatter/table)
-# ----------------------------------------------------------------------
 def build_chart_from_spec(spec: Dict[str, Any]) -> Optional[alt.Chart]:
-    """Returns None for a "table" spec (rendered as a dataframe by the
-    caller instead), for a spec with no usable data, or for any field
-    name the model invented that isn't actually in its own data — never
-    raises, since a slightly malformed spec should just fall back to
-    plain text, not break the chat turn."""
     data = pd.DataFrame(spec.get("data") or [])
     if data.empty:
         return None
@@ -192,10 +132,6 @@ def render_agent_message(message: Dict[str, Any]) -> None:
     if chart is not None:
         st.altair_chart(chart, use_container_width=True)
 
-
-# ----------------------------------------------------------------------
-# Top-level entrypoint -- the only function app.py needs to call
-# ----------------------------------------------------------------------
 def render_bi_chat(conn, profile_df: pd.DataFrame) -> None:
     st.subheader("Fleet BI")
     st.caption(

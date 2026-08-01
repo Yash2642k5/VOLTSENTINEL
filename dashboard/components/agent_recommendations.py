@@ -1,31 +1,3 @@
-"""
-dashboard/components/agent_recommendations.py
-
-Per-asset panel showing the agent decision layer's output for whichever
-vehicle is currently selected — distinct from alert_feed.py's fleet-wide
-ticker. Sections:
-
-  0. Quarantine banner: if this asset is currently quarantined (Tier 3
-     circuit breaker, agent/actions.py's quarantine_vehicle), shows why
-     and offers a human-only release control. This is the ONLY place in
-     the dashboard that can call release_vehicle_quarantine — deliberately
-     requires a typed name before the button enables, since that name is
-     what lands in the audit trail (agent_actions.parameters.released_by).
-  1. Live reasoning: a "Run agent reasoning" button that calls
-     agent/decision_engine.py's Perceive->Reason->Decide loop for this
-     one asset, previews the resulting actions, and only writes them to
-     agent_actions (the Act step) once the user explicitly confirms —
-     separating "what would the agent do" from "actually do it," since
-     Streamlit reruns the whole script on every widget interaction and
-     we don't want a stray rerun silently re-logging duplicate tickets.
-  2. History: past actions already logged for this vehicle, reusing
-     alert_feed.py's card renderer for a consistent look.
-
-Requires GEMINI_API_KEY to be set for the live-reasoning section — if
-it isn't, that section degrades to an explanatory message rather than
-erroring, and the history section still works (it's pure DB read).
-"""
-
 from __future__ import annotations
 
 import os
@@ -39,11 +11,6 @@ from agent.decision_engine import DecisionEngine
 from dashboard.components.alert_feed import render_alert_card
 from dashboard.utils import clear_all_caches, get_vehicle_actions
 
-
-# ----------------------------------------------------------------------
-# Cached engine — one Gemini client per session, not re-created on
-# every button click / rerun.
-# ----------------------------------------------------------------------
 @st.cache_resource
 def get_decision_engine() -> Optional[DecisionEngine]:
     if not os.environ.get("GEMINI_API_KEY"):
@@ -51,14 +18,9 @@ def get_decision_engine() -> Optional[DecisionEngine]:
     try:
         return DecisionEngine.create()
     except Exception:
-        # Bad key, network issue at client construction time, etc. — treat
-        # the same as "unavailable" rather than crashing the dashboard.
         return None
 
-
-# ----------------------------------------------------------------------
-# Pure helpers
-# ----------------------------------------------------------------------
+#helpers
 def decision_action_to_row(vehicle_id: str, action: Dict[str, Any], status: str) -> Dict[str, Any]:
     """Reshapes one action from a decision_engine result (action_type,
     priority, rationale, parameters) into the same shape alert_feed.py's
@@ -74,10 +36,6 @@ def decision_action_to_row(vehicle_id: str, action: Dict[str, Any], status: str)
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-
-# ----------------------------------------------------------------------
-# Quarantine banner + human-only release control (Tier 3)
-# ----------------------------------------------------------------------
 def render_quarantine_controls(conn, vehicle_id: str) -> None:
     """No-ops entirely if the vehicle isn't currently quarantined — this
     banner should only ever appear when agent/actions.py's
@@ -89,7 +47,7 @@ def render_quarantine_controls(conn, vehicle_id: str) -> None:
         return
 
     st.error(
-        f"🔒 **{vehicle_id} is quarantined.** Any further unticketed BMS command for this "
+        f"**{vehicle_id} is quarantined.** Any further unticketed BMS command for this "
         f"vehicle is being rejected outright at ingestion. Reason: {status['reason']}",
         icon="🔒",
     )
@@ -108,10 +66,6 @@ def render_quarantine_controls(conn, vehicle_id: str) -> None:
         st.success(f"Quarantine released for {vehicle_id} by {released_by.strip()}.")
         st.rerun()
 
-
-# ----------------------------------------------------------------------
-# Live reasoning section
-# ----------------------------------------------------------------------
 def render_live_decision_section(conn, vehicle_id: str, profile_row: Dict[str, Any]) -> None:
     engine = get_decision_engine()
     session_key = f"agent_decision__{vehicle_id}"
@@ -152,10 +106,6 @@ def render_live_decision_section(conn, vehicle_id: str, profile_row: Dict[str, A
         del st.session_state[session_key]
         st.rerun()
 
-
-# ----------------------------------------------------------------------
-# History section
-# ----------------------------------------------------------------------
 def render_agent_history_section(conn, vehicle_id: str) -> None:
     history_df = get_vehicle_actions(conn, vehicle_id)
     if history_df.empty:
@@ -166,10 +116,6 @@ def render_agent_history_section(conn, vehicle_id: str) -> None:
     for _, row in history_df.iterrows():
         render_alert_card(row.to_dict())
 
-
-# ----------------------------------------------------------------------
-# Top-level entrypoint — the only function app.py needs to call
-# ----------------------------------------------------------------------
 def render_agent_recommendations(conn, vehicle_id: str, profile_row: Optional[Dict[str, Any]]) -> None:
     if profile_row is None:
         st.warning(f"No risk profile available for {vehicle_id} yet.")

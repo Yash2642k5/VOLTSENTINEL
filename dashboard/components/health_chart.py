@@ -1,47 +1,3 @@
-"""
-dashboard/components/health_chart.py
-
-Per-asset health visualization: capacity-fade / RUL projection, thermal
-trend, and charging-behaviour trend. Consumes models/ output by way of
-dashboard/utils.py's cached queries — this file does not fit RUL curves
-or run anomaly detection itself except where a chart genuinely needs a
-per-cycle signal that risk_engine's aggregate profile doesn't expose
-(thermal anomaly flags per point, so we can highlight the exact cycles).
-
-Split in two layers, deliberately:
-  - build_*_chart(...)   -> returns an altair Chart object. Pure — no
-    Streamlit calls, so these are unit-testable without a running app
-    (assert on encoding/data, not pixels).
-  - render_health_chart(...) -> the actual page section: pulls data via
-    dashboard/utils.py, calls the build_* functions, and is the only
-    place in this file that touches `st.*`.
-
-Uses Altair (bundled with Streamlit — no extra dependency) rather than
-Plotly, specifically so requirements.txt doesn't grow for this.
-
-Live SoC / range (Future Roadmap Feature 2): render_health_summary_metrics
-now also takes an optional range_row (dashboard/utils.py's
-get_vehicle_range_estimate()) and surfaces a same-day "Live SoC / Range"
-metric plus a stranding-risk warning banner — distinct from the other
-four metrics here, which are all longer-horizon/aggregate signals from
-risk_engine.py's profile. This mirrors fleet_map.py's fleet-wide version
-of the same signal (its "Stranding Risk" tile + red map ring), just
-scoped to the one asset currently open in this tab. Falls back to "—"
-when range_row is omitted, matching every other optional-param pattern
-already used in this file (e.g. profile_row.get(...) throughout).
-
-Weather-aware range (Future Roadmap Feature 8): range_row now may also
-carry `ambient_temp_c` / `weather_adjustment_factor` (from
-models/range_estimator.py, via dashboard/utils.get_vehicle_range_estimate()).
-render_health_summary_metrics appends the live ambient temperature to the
-"Live SoC / Range" metric text when available, and the stranding-risk
-banner notes when the range figure has been adjusted for weather. Both
-are purely additive — a range_row without these keys (e.g. weather lookup
-failed, or the dict came from an older/weather-agnostic call) renders
-exactly as it did before this feature, since both checks use
-`.get(...)` and only add text when the value is actually present.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -69,7 +25,7 @@ from models.anomaly_detector import (
     AnomalyDetector,
 )
 from models.charging_analyzer import DEFAULT_HIGH_DOD_THRESHOLD_PCT
-from models.rul_model import _exp_decay  # reuse the exact fit formula, not a re-derivation
+from models.rul_model import _exp_decay
 
 FAST_CHARGE_COLOR = "#1E88E5"
 NORMAL_CHARGE_COLOR = "#9E9D24"
@@ -83,14 +39,7 @@ def _is_valid_number(value: Any) -> bool:
         return False
     return True
 
-
-# ----------------------------------------------------------------------
-# Capacity fade / RUL projection
-# ----------------------------------------------------------------------
 def build_capacity_fade_chart(telemetry_df: pd.DataFrame, profile_row: Dict[str, Any]) -> alt.Chart:
-    """Actual capacity_pct_of_rated per cycle, plus (when the fit
-    converged) the fitted decay curve extended out to the projected
-    EOL cycle, and a threshold rule at end_of_life_capacity_pct."""
     status = profile_row.get("status", "unknown")
     line_color = RUL_STATUS_COLORS.get(status, "#1976D2")
 
@@ -149,15 +98,7 @@ def build_capacity_fade_chart(telemetry_df: pd.DataFrame, profile_row: Dict[str,
     return alt.layer(*layers).properties(height=320).interactive()
 
 
-# ----------------------------------------------------------------------
-# Thermal trend
-# ----------------------------------------------------------------------
 def build_thermal_chart(telemetry_df: pd.DataFrame) -> alt.Chart:
-    """Temperature per cycle, with safe/critical threshold rules and the
-    exact cycles the rule-based thermal detector flags highlighted —
-    recomputed here (cheap, no ML fit involved) rather than pulled from
-    risk_engine's profile, since the profile only carries the aggregate
-    count, not which specific cycles triggered it."""
     detector = AnomalyDetector()
     detect_input = telemetry_df.drop(columns=["thermal_event_flag"], errors="ignore")
     result = detector.detect_thermal_anomalies(detect_input)
@@ -202,15 +143,7 @@ def build_thermal_chart(telemetry_df: pd.DataFrame) -> alt.Chart:
 
     return alt.layer(base, anomaly_points, safe_rule, critical_rule).properties(height=280).interactive()
 
-
-# ----------------------------------------------------------------------
-# Charging behaviour
-# ----------------------------------------------------------------------
 def build_charging_chart(telemetry_df: pd.DataFrame) -> alt.Chart:
-    """Depth-of-discharge per cycle, colored by whether that cycle was a
-    fast-charge event, with a rule at the high-DoD ('abusive') threshold
-    so the driver-coaching case from charging_analyzer's suggested_policy
-    is visible directly on the chart, not just in the summary metric."""
     df = telemetry_df.copy()
     df["charge_type"] = np.where(df["is_fast_charge"], "Fast charge", "Standard charge")
 
@@ -244,10 +177,6 @@ def build_charging_chart(telemetry_df: pd.DataFrame) -> alt.Chart:
 
     return alt.layer(points, high_dod_rule).properties(height=280).interactive()
 
-
-# ----------------------------------------------------------------------
-# Summary metrics row
-# ----------------------------------------------------------------------
 def render_health_summary_metrics(
     profile_row: Dict[str, Any], range_row: Optional[Dict[str, Any]] = None
 ) -> None:
@@ -260,18 +189,6 @@ def render_health_summary_metrics(
         unsafe_allow_html=True,
     )
 
-    # Live SoC/range is a same-day operational signal, distinct from the
-    # longer-horizon RUL/thermal metrics below — surfaced as a standalone
-    # warning banner (not just a metric tile) when the vehicle is
-    # currently at risk of stranding, so it's impossible to miss even if
-    # the manager only glances at this tab.
-    #
-    # Weather-aware range (Feature 8): when the range estimate carried a
-    # live ambient temperature that actually pushed the adjustment factor
-    # above ~1% (i.e. weather materially affected this number, not just a
-    # rounding no-op), note that in the banner so the manager understands
-    # *why* the range figure might read lower than a naive kWh/rate
-    # calculation would suggest.
     if range_row and range_row.get("at_risk_of_stranding"):
         weather_note = ""
         if (
@@ -280,7 +197,7 @@ def render_health_summary_metrics(
         ):
             weather_note = f" (range adjusted for {range_row['ambient_temp_c']:.0f}°C ambient)"
         st.warning(
-            f"⚠️ **Low SoC/range** — currently at {format_pct(range_row.get('soc_pct'), decimals=0)} "
+            f"**Low SoC/range** — currently at {format_pct(range_row.get('soc_pct'), decimals=0)} "
             f"state of charge, an estimated {format_km(range_row.get('estimated_range_km'))} of "
             f"range remaining{weather_note}.",
             icon="⚠️",
@@ -305,11 +222,6 @@ def render_health_summary_metrics(
     cols[2].metric("Thermal Anomalies", format_count(profile_row.get("thermal_anomaly_count"), "anomaly"))
     cols[3].metric("Latest Temp", format_temperature(profile_row.get("latest_temp_c")))
 
-    # Live SoC/Range value — kept short enough to never truncate inside
-    # st.metric's fixed-width tile. The live ambient temperature (Feature
-    # 8), when available, is shown as a caption underneath instead of
-    # appended inline, since st.metric clips long strings rather than
-    # wrapping them.
     if range_row:
         live_value = (
             f"{format_pct(range_row.get('soc_pct'), decimals=0)} · "
@@ -322,9 +234,6 @@ def render_health_summary_metrics(
         cols[4].caption(f"🌤️ {range_row['ambient_temp_c']:.0f}°C ambient")
 
 
-# ----------------------------------------------------------------------
-# Top-level entrypoint — the only function app.py needs to call
-# ----------------------------------------------------------------------
 def render_health_chart(conn, vehicle_id: str, profile_df: pd.DataFrame) -> None:
     row = get_vehicle_row(profile_df, vehicle_id)
     if row is None:
@@ -353,16 +262,6 @@ def render_health_chart(conn, vehicle_id: str, profile_df: pd.DataFrame) -> None
 
     with tab_charging:
         suggested_policy = row.get("suggested_policy")
-        # charging_analyzer.py returns None (not NaN) for "no concerns" --
-        # but building the fleet profile into a pandas DataFrame silently
-        # converts that None into float('nan') once it shares a column with
-        # other vehicles' real string values. NaN is truthy in Python (a
-        # plain `if suggested_policy:` does not catch it), so without this
-        # explicit null/NaN check every "no concerns" vehicle rendered the
-        # literal text "Suggested charge policy: nan" instead of nothing.
-        # _is_valid_number (defined above) is really a general not-null-or-
-        # NaN check despite the name -- reused here rather than duplicating
-        # the same pd.isnull() logic a second time in this file.
         if _is_valid_number(suggested_policy):
             st.info(f"Suggested charge policy: {suggested_policy}")
         st.altair_chart(build_charging_chart(telemetry_df), use_container_width=True)

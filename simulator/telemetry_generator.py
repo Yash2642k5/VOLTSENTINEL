@@ -15,8 +15,6 @@ class TelemetryGenerator:
         self.rng = np.random.default_rng(config.random_seed)
         self.vehicle_ids = [f"EVR-{i:04d}" for i in range(1, config.fleet_size + 1)]
 
-        # Per-vehicle manufacturing/degradation variance, fixed once per vehicle
-        # so repeated calls for the same vehicle are internally consistent.
         self._decay_rates: Dict[str, float] = {}
         self._rated_capacities: Dict[str, float] = {}
         self._init_vehicle_params()
@@ -121,16 +119,11 @@ class TelemetryGenerator:
         return pd.DataFrame(rows)
 
     def generate_fleet(self) -> pd.DataFrame:
-        """Generates telemetry for every vehicle in the fleet and concatenates it
-        into a single DataFrame — this is what ingestion/db.py ultimately loads."""
         frames = [self.generate_vehicle_telemetry(vid) for vid in self.vehicle_ids]
         return pd.concat(frames, ignore_index=True)
 
     @staticmethod
     def get_vehicle_time_bounds(telemetry_df: pd.DataFrame) -> Dict[str, Tuple[datetime, datetime]]:
-        """Returns {vehicle_id: (first_timestamp, last_timestamp)}.
-        Used by maintenance_generator and attack_injector to place events
-        within a vehicle's actual active window."""
         bounds = {}
         df = telemetry_df.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -141,7 +134,6 @@ class TelemetryGenerator:
 
 
 if __name__ == "__main__":
-    # Standalone sanity check: generate telemetry and print a quick summary.
     gen = TelemetryGenerator()
     fleet_df = gen.generate_fleet()
     print(f"Generated {len(fleet_df)} telemetry rows for {gen.config.fleet_size} vehicles "

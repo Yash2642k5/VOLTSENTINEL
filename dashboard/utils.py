@@ -1,74 +1,3 @@
-"""
-dashboard/utils.py
-
-Shared helpers for every dashboard/components/*.py file and app.py:
-cached DB access, cached fleet-profile computation, and the formatting/
-color-mapping functions used to render badges consistently across the
-fleet view, health charts, alert feed, and agent recommendations panel.
-
-Nothing in here renders a widget itself (no st.write/st.metric/etc.) —
-this is pure data-and-formatting, matching the project's existing split
-between "compute" (models/, agent/) and "display" (dashboard/). Keeping
-that split here too means components/*.py stays thin and every number
-on screen traces back to one of the query functions below.
-
-Caching notes:
-  - get_connection() is a single cached resource (st.cache_resource) —
-    sqlite3.Connection isn't picklable/hashable in the way st.cache_data
-    wants, and there's no reason to reopen the DB file every rerun.
-  - Every function that takes the connection as an argument names the
-    parameter `_conn` (leading underscore) — this is Streamlit's
-    convention for "don't try to hash this argument," required for any
-    unhashable object passed into a cache_data-wrapped function.
-  - TTLs are short (a few seconds) rather than infinite: this dashboard
-    is built around a live "Simulate Attack" demo trigger (Phase 5,
-    dashboard/components/attack_trigger.py), so a fleet view that never
-    refreshes would defeat the point of the demo.
-
-Plain-language labels: STATUS_PLAIN_LABELS / SECURITY_PLAIN_LABELS (and
-their status_plain_label() / security_plain_label() lookup helpers) exist
-specifically for a non-technical fleet-manager audience, alongside the
-existing technical labels (status_label(), etc.) which some components
-still use for badges/logs.
-
-Driver identity / vehicle assignment (Future Roadmap Feature 1):
-get_drivers() and get_current_drivers_by_vehicle() below are additive —
-every existing query here still keys purely on vehicle_id. A vehicle
-with no assignment history yet (e.g. a DB seeded before this feature
-existed) is simply absent from get_current_drivers_by_vehicle()'s
-result, matching get_latest_vehicle_locations()'s existing "absent, not
-a placeholder" convention for vehicles with no command history.
-
-Driver-level coaching (Future Roadmap Feature 5):
-get_driver_charging_profile() is also additive — a thin cached wrapper
-around models/charging_analyzer.py's analyze_fleet_drivers(), backing
-dashboard/components/driver_scorecard.py, mirroring get_fleet_profile()'s
-pattern for the vehicle-level equivalent.
-
-Live SoC / range estimation (Future Roadmap Feature 2):
-get_fleet_range_estimates() and get_vehicle_range_estimate() below are
-also additive, backing dashboard/components/fleet_map.py's stranding-
-risk tile/map-marker and dashboard/components/health_chart.py's
-Asset Detail summary row respectively. Both are thin wrappers around
-models/range_estimator.py — no new detection/estimation logic lives
-here, matching the "compute lives in models/, display lives in
-dashboard/" split noted above.
-
-Weather-aware range (Future Roadmap Feature 8):
-get_weather_client() below is a single st.cache_resource-cached
-models.weather_client.WeatherClient, shared across every rerun in a
-session — this is what makes the client's own internal per-coordinate
-TTL cache actually useful (dashboard reruns every few seconds via
-DEFAULT_CACHE_TTL_SECONDS below; a fresh client per rerun would defeat
-its cache entirely). get_fleet_range_estimates() and
-get_vehicle_range_estimate() now pass this client through to
-models/range_estimator.py's estimate_fleet()/estimate_vehicle_live() —
-if the live weather lookup fails for any reason, those functions
-degrade to their original weather-agnostic numbers automatically (see
-range_estimator.py's docstring), so nothing here needs its own
-try/except for that.
-"""
-
 from __future__ import annotations
 
 import sqlite3
@@ -80,10 +9,7 @@ import streamlit as st
 
 DEFAULT_CACHE_TTL_SECONDS = 8
 
-# ----------------------------------------------------------------------
-# Color / label mappings — the single source of truth every component
-# should import from, instead of hardcoding hex codes or label strings.
-# ----------------------------------------------------------------------
+# Color / label mappings
 RISK_LEVEL_COLORS: Dict[str, str] = {
     "minimal": "#2E7D32",  # green
     "low": "#9E9D24",      # olive
@@ -123,23 +49,20 @@ ACTION_TYPE_LABELS: Dict[str, str] = {
     "no_action": "No Action",
 }
 
-# ----------------------------------------------------------------------
-# Plain-language labels — for a non-technical fleet-manager audience.
-# ----------------------------------------------------------------------
 STATUS_PLAIN_LABELS: Dict[str, str] = {
-    "healthy": "Battery is healthy",
-    "watch": "Keep an eye on this one",
-    "degraded": "Needs a checkup soon",
-    "critical": "Needs attention now",
-    "insufficient_data": "Not enough data yet",
-    "no_fit": "Not enough data yet",
+    "healthy": "HEALTHY",
+    "watch": "KEEP AN EYE",
+    "degraded": "CHECKUP NEEDED",
+    "critical": "NEEDS ATTENTION",
+    "insufficient_data": "INSUFFICIENT DATA",
+    "no_fit": "NOT ENOUGH DATA",
 }
 
 SECURITY_PLAIN_LABELS: Dict[str, str] = {
-    "none": "No suspicious activity",
-    "low": "Minor irregularity noticed",
-    "medium": "Suspicious command detected",
-    "high": "Likely unauthorized tampering",
+    "none": "NO SUSPICIOUS ACTIVITY",
+    "low": "MINOR IRREGULARITY",
+    "medium": "SUSPICIOUS COMMAND",
+    "high": "UNAUTHORIZED TAMPERING",
 }
 
 
@@ -154,10 +77,6 @@ def security_plain_label(value: Optional[str]) -> str:
         return "Unknown"
     return SECURITY_PLAIN_LABELS.get(value, "Unknown")
 
-
-# ----------------------------------------------------------------------
-# Connection — one cached resource, reused across reruns
-# ----------------------------------------------------------------------
 @st.cache_resource
 def get_connection() -> sqlite3.Connection:
     from ingestion.db import get_connection as _get_connection, init_db
@@ -168,12 +87,6 @@ def get_connection() -> sqlite3.Connection:
 
 
 def ensure_seeded(_conn: sqlite3.Connection) -> None:
-    """Checked on every rerun (cheap — one COUNT query), not just once per
-    process lifetime. Streamlit Community Cloud's ephemeral disk can lose
-    data/voltsentinel.db without necessarily killing the Python process/
-    cache_resource cache, so gating this behind get_connection() alone
-    isn't reliable — this catches an underlying-file wipe mid-session too.
-    Reseeds automatically if the DB comes back empty; no-ops otherwise."""
     from ingestion.db import row_counts, DB_PATH
 
     if row_counts(_conn)["telemetry"] == 0:
@@ -183,30 +96,14 @@ def ensure_seeded(_conn: sqlite3.Connection) -> None:
 
 
 def clear_all_caches() -> None:
-    """Called by attack_trigger.py (Phase 5) after injecting a live event,
-    so the fleet view reflects it on the very next rerun instead of
-    waiting out the TTL."""
     st.cache_data.clear()
 
-
-# ----------------------------------------------------------------------
-# Weather client (Future Roadmap Feature 8) — one instance per session,
-# reused across reruns so its own internal per-coordinate TTL cache
-# (models/weather_client.py, default 10 minutes) actually avoids
-# refetching on every ~8s dashboard rerun. st.cache_resource, not
-# st.cache_data, since WeatherClient is a stateful object (holds its own
-# cache dict), matching get_connection()'s pattern above.
-# ----------------------------------------------------------------------
 @st.cache_resource
 def get_weather_client():
     from models.weather_client import WeatherClient
 
     return WeatherClient()
 
-
-# ----------------------------------------------------------------------
-# Cached queries — fleet-level
-# ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_vehicle_ids(_conn: sqlite3.Connection) -> List[str]:
     from ingestion.db import get_all_vehicle_ids
@@ -216,9 +113,6 @@ def get_vehicle_ids(_conn: sqlite3.Connection) -> List[str]:
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_fleet_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """The dashboard's single most expensive call — fits RUL for every
-    vehicle, runs both anomaly detectors, and scores charging behaviour.
-    Cached so switching between dashboard tabs doesn't redo this work."""
     from models.risk_engine import RiskEngine
 
     engine = RiskEngine()
@@ -227,11 +121,6 @@ def get_fleet_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_driver_charging_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """Backs the Driver Scorecard tab (Future Roadmap Feature 5) --
-    charging behaviour re-aggregated by driver_id instead of vehicle_id.
-    See models/charging_analyzer.py's analyze_fleet_drivers() for the
-    aggregation logic; this is a thin cached wrapper, matching
-    get_fleet_profile()'s pattern for the vehicle-level equivalent."""
     from models.charging_analyzer import ChargingAnalyzer
 
     analyzer = ChargingAnalyzer()
@@ -240,8 +129,6 @@ def get_driver_charging_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_recent_actions(_conn: sqlite3.Connection, exclude_no_action: bool = True) -> pd.DataFrame:
-    """Backs the alert feed (dashboard/components/alert_feed.py, Phase 5).
-    Returns agent_actions rows as a DataFrame, newest first."""
     from agent.actions import get_all_actions
 
     rows = get_all_actions(_conn, exclude_no_action=exclude_no_action)
@@ -252,13 +139,8 @@ def get_recent_actions(_conn: sqlite3.Connection, exclude_no_action: bool = True
         ])
     return pd.DataFrame([dict(r) for r in rows])
 
-
-# ----------------------------------------------------------------------
-# Cached queries — asset registry
-# ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_all_vehicle_metadata(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """Full asset registry — make/model/VIN/purchase/warranty per vehicle."""
     from ingestion.db import get_all_vehicle_metadata as _get_all_vehicle_metadata
 
     rows = _get_all_vehicle_metadata(_conn)
@@ -268,25 +150,14 @@ def get_all_vehicle_metadata(_conn: sqlite3.Connection) -> pd.DataFrame:
         ])
     return pd.DataFrame([dict(r) for r in rows])
 
-
-# ----------------------------------------------------------------------
-# Cached queries — reliability metrics (MTBF/MTTR)
-# ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_fleet_reliability_profile(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """MTBF/MTTR and maintenance-event counts per vehicle."""
     from models.reliability_metrics import ReliabilityAnalyzer
 
     return ReliabilityAnalyzer().analyze_fleet(_conn)
 
-
-# ----------------------------------------------------------------------
-# Cached queries — drivers / vehicle assignments (Future Roadmap Feature 1)
-# ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_drivers(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """The full driver pool, independent of any vehicle assignment —
-    backs a future driver picker/roster view."""
     from ingestion.db import get_all_drivers
 
     rows = get_all_drivers(_conn)
@@ -295,12 +166,6 @@ def get_drivers(_conn: sqlite3.Connection) -> pd.DataFrame:
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_current_drivers_by_vehicle(_conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
-    """{vehicle_id: {driver_id, name, license_id, depot_home, shift_start,
-    shift_end}} for every vehicle that has assignment history — vehicles
-    with none yet are simply absent, not padded with a placeholder driver.
-    Iterates per-vehicle rather than a single join query, matching the
-    same per-vehicle query pattern get_latest_vehicle_locations() below
-    and ingestion/db.py's other per-vehicle helpers already use."""
     from ingestion.db import get_all_vehicle_ids, get_current_driver_for_vehicle
 
     result: Dict[str, Dict[str, Any]] = {}
@@ -310,28 +175,8 @@ def get_current_drivers_by_vehicle(_conn: sqlite3.Connection) -> Dict[str, Dict[
             result[vid] = driver
     return result
 
-
-# ----------------------------------------------------------------------
-# Cached queries — live SoC / range estimation (Future Roadmap Feature 2)
-# Now weather-aware (Future Roadmap Feature 8) via get_weather_client().
-# ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_fleet_range_estimates(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """Live per-vehicle SoC/range signal, built fresh from each vehicle's
-    LATEST telemetry row only — distinct from get_fleet_profile()'s
-    longer-horizon RUL/thermal/charging/security profile. Kept as its
-    own cached query rather than folded into risk_engine.py, since it
-    answers a same-day operational question ("can this vehicle make it
-    back right now?"), not a degradation one. Backs
-    dashboard/components/fleet_map.py's stranding-risk tile/map-marker/
-    table columns.
-
-    Now also weather-adjusted (Feature 8): passes the session's shared
-    WeatherClient through to range_estimator.py's estimate_fleet(), so
-    the range figure reflects live ambient temperature per vehicle's
-    last known region. If the weather lookup fails for any reason, this
-    degrades automatically to the original weather-agnostic numbers —
-    no special-casing needed here."""
     from models.range_estimator import RangeEstimator
     from simulator.config import default_config
 
@@ -345,18 +190,6 @@ def get_fleet_range_estimates(_conn: sqlite3.Connection) -> pd.DataFrame:
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_vehicle_range_estimate(_conn: sqlite3.Connection, vehicle_id: str) -> Dict[str, Any]:
-    """Live SoC/range signal for ONE vehicle — backs the Asset Detail
-    tab's summary row (dashboard/components/health_chart.py), alongside
-    get_fleet_range_estimates()'s fleet-wide version used by the Fleet
-    Overview tab. Returns a models.range_estimator.RangeEstimate.to_dict()
-    -shaped dict; every field is None/False if the vehicle has no
-    telemetry yet, matching get_vehicle_row()'s "explainable empty
-    state" convention rather than raising or returning None outright —
-    callers can safely do range_row.get(...) either way.
-
-    Now also weather-adjusted (Feature 8) via estimate_vehicle_live() and
-    the session's shared WeatherClient — same degrade-gracefully
-    behaviour as get_fleet_range_estimates() above."""
     from models.range_estimator import RangeEstimator
     from simulator.config import default_config
 
@@ -369,10 +202,6 @@ def get_vehicle_range_estimate(_conn: sqlite3.Connection, vehicle_id: str) -> Di
         _conn, vehicle_id, weather_client=get_weather_client()
     ).to_dict()
 
-
-# ----------------------------------------------------------------------
-# Cached queries — per-vehicle (health_chart.py, fleet_map.py, etc.)
-# ----------------------------------------------------------------------
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_vehicle_telemetry(_conn: sqlite3.Connection, vehicle_id: str) -> pd.DataFrame:
     from ingestion.db import get_telemetry_for_vehicle
@@ -399,9 +228,6 @@ def get_vehicle_tickets(_conn: sqlite3.Connection, vehicle_id: str) -> pd.DataFr
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_vehicle_assignments(_conn: sqlite3.Connection, vehicle_id: str) -> pd.DataFrame:
-    """Full shift-assignment history for one vehicle, oldest first — backs
-    a future per-asset "assignment history" panel alongside the existing
-    health/thermal/charging tabs in health_chart.py."""
     from ingestion.db import get_assignments_for_vehicle
 
     rows = get_assignments_for_vehicle(_conn, vehicle_id)
@@ -422,10 +248,6 @@ def get_vehicle_actions(_conn: sqlite3.Connection, vehicle_id: str) -> pd.DataFr
 
 
 def get_vehicle_row(profile_df: pd.DataFrame, vehicle_id: str) -> Optional[Dict[str, Any]]:
-    """Pulls one asset's row out of an already-fetched fleet profile —
-    prefer this over re-querying when a component already has the
-    fleet-wide DataFrame in hand (e.g. fleet_map.py rendering a detail
-    panel after the user clicks a marker)."""
     match = profile_df[profile_df["vehicle_id"] == vehicle_id]
     if match.empty:
         return None
@@ -434,13 +256,6 @@ def get_vehicle_row(profile_df: pd.DataFrame, vehicle_id: str) -> Optional[Dict[
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_latest_vehicle_locations(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """One row per vehicle that has issued at least one BMS command: its
-    most recent latitude/longitude/timestamp/command_type. Vehicles with
-    no command history yet are simply absent — callers (fleet_map.py)
-    decide how to note that rather than this function inventing a
-    placeholder location. Iterates per-vehicle rather than a raw SQL
-    MAX(timestamp) join, matching the per-vehicle query pattern already
-    used throughout ingestion/db.py and models/risk_engine.py."""
     from ingestion.db import get_all_vehicle_ids, get_commands_for_vehicle
 
     rows = []
@@ -448,7 +263,7 @@ def get_latest_vehicle_locations(_conn: sqlite3.Connection) -> pd.DataFrame:
         commands = get_commands_for_vehicle(_conn, vid)
         if not commands:
             continue
-        latest = commands[-1]  # get_commands_for_vehicle orders by timestamp ascending
+        latest = commands[-1]
         rows.append({
             "vehicle_id": vid,
             "latitude": latest["latitude"],
@@ -461,11 +276,6 @@ def get_latest_vehicle_locations(_conn: sqlite3.Connection) -> pd.DataFrame:
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS)
 def get_fleet_live_state(_conn: sqlite3.Connection) -> pd.DataFrame:
-    """Current position + active/inactive status per vehicle, written by
-    scripts/live_feed.py. Empty until the live feed has run at least
-    once against this DB — fleet_map.py falls back to
-    get_latest_vehicle_locations()'s command-derived location for
-    vehicles absent here."""
     from ingestion.db import get_all_vehicle_live_state
 
     rows = get_all_vehicle_live_state(_conn)
@@ -479,10 +289,6 @@ def get_fleet_live_state(_conn: sqlite3.Connection) -> pd.DataFrame:
         for r in rows
     ])
 
-
-# ----------------------------------------------------------------------
-# Fleet-wide summary stats — backs app.py's top-level metric row
-# ----------------------------------------------------------------------
 def fleet_summary_stats(profile_df: pd.DataFrame) -> Dict[str, Any]:
     if profile_df.empty:
         return {
@@ -509,11 +315,6 @@ def fleet_summary_stats(profile_df: pd.DataFrame) -> Dict[str, Any]:
         "mean_charge_stress_score": round(float(mean_stress), 1) if pd.notnull(mean_stress) else None,
     }
 
-
-# ----------------------------------------------------------------------
-# Formatting helpers — every "how does this number look on screen"
-# decision lives here, so components stay declarative.
-# ----------------------------------------------------------------------
 def format_pct(value: Optional[float], decimals: int = 1, placeholder: str = "—") -> str:
     if value is None or pd.isnull(value):
         return placeholder
@@ -533,9 +334,6 @@ def format_hours(value: Optional[float], placeholder: str = "—") -> str:
 
 
 def format_km(value: Optional[float], placeholder: str = "—") -> str:
-    """'42.3 km' style formatting for the live range estimate (Future
-    Roadmap Feature 2) — used by both fleet_map.py's table/tile and
-    health_chart.py's Asset Detail summary row."""
     if value is None or pd.isnull(value):
         return placeholder
     return f"{value:,.1f} km"
@@ -563,9 +361,6 @@ def format_count(value: Optional[int], noun: str, placeholder: str = "—") -> s
 
 
 def format_relative_time(timestamp: Any, placeholder: str = "—") -> str:
-    """'3h ago' / '2d ago' style relative formatting for the alert feed,
-    so the most urgent-looking items don't require the viewer to parse
-    an ISO timestamp mid-demo."""
     if timestamp is None or (isinstance(timestamp, float) and pd.isnull(timestamp)):
         return placeholder
 
@@ -597,9 +392,6 @@ def format_relative_time(timestamp: Any, placeholder: str = "—") -> str:
 
 
 def badge_color(value: Optional[str], color_map: Dict[str, str], default: str = "#757575") -> str:
-    """Shared lookup used by every *_COLORS map above — a single place
-    that decides what an unrecognized/missing value renders as, instead
-    of each component guessing its own fallback color."""
     if value is None:
         return default
     return color_map.get(value, default)

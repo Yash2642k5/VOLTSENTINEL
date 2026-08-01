@@ -1,9 +1,3 @@
-"""Continuously appends new telemetry cycles and updated GPS position to
-an already-seeded fleet, timestamped "now" — vehicles that keep
-reporting and driving instead of a one-shot historical batch. Resumes
-each vehicle's degradation curve and last-known position from the DB
-rather than restarting fresh."""
-
 from __future__ import annotations
 
 import math

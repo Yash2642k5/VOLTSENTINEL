@@ -1,19 +1,3 @@
-"""
-simulator/maintenance_generator.py
-
-Generates mock maintenance ticket records for the fleet. Each ticket
-represents a legitimate, authorized reason for a BMS command to occur
-(e.g. a technician issuing a discharge cut-off during a depot inspection).
-
-attack_injector.py uses this ticket format to know what "no matching
-ticket" means — an injected attack command deliberately has no
-corresponding row here.
-
-Depends only on config.py and a vehicle_id / time-bounds input (normally
-produced by telemetry_generator.get_vehicle_time_bounds), not on the
-telemetry values themselves.
-"""
-
 from __future__ import annotations
 
 import uuid

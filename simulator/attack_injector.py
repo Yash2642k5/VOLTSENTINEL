@@ -1,23 +1,3 @@
-"""
-simulator/attack_injector.py
-
-Builds the full BMS command event stream for the fleet:
-1. Legitimate commands, each tied to a real maintenance ticket, issued
-    at/near the depot at the ticket's timestamp.
-2. Injected "attack" commands, mirroring the real Tirri Challenge
-    mechanics — no matching ticket, GPS inconsistent with any depot
-    (vehicle "in motion"), and/or a burst of repeated commands in a
-    short window.
-
-Needs telemetry_generator's vehicle IDs / time bounds (to know when a
-vehicle is active) and maintenance_generator's ticket format (to know
-what "no matching ticket" means and to place legitimate commands).
-
-The `is_attack` column is a ground-truth label kept ONLY for validating
-the anomaly detector later (models/anomaly_detector.py) — the detector
-itself must never see this column, since in reality no such label exists.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -35,9 +15,7 @@ class AttackInjector:
         self.config = config
         self.rng = np.random.default_rng(config.random_seed + 2)  # offset from telemetry/maintenance
 
-    # ------------------------------------------------------------------
     # Legitimate commands — one per maintenance ticket
-    # ------------------------------------------------------------------
     def _legitimate_commands_from_tickets(self, tickets_df: pd.DataFrame) -> List[dict]:
         cfg = self.config
         legit_types = [c for c in cfg.command_types]  # all types can occur legitimately
@@ -61,9 +39,7 @@ class AttackInjector:
             })
         return commands
 
-    # ------------------------------------------------------------------
     # Injected attack commands — Tirri Challenge mechanics
-    # ------------------------------------------------------------------
     def _random_road_coords(self) -> Tuple[float, float]:
         """Picks a depot as a rough regional anchor, then jitters far enough
         away to represent 'in motion on a public road', not at the depot."""
@@ -133,9 +109,8 @@ class AttackInjector:
         chosen = self.rng.choice(vehicle_ids, size=n_affected, replace=False)
         return list(chosen)
 
-    # ------------------------------------------------------------------
     # Public entrypoint
-    # ------------------------------------------------------------------
+
     def generate_command_stream(
         self,
         vehicle_time_bounds: Dict[str, Tuple[datetime, datetime]],

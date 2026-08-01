@@ -1,25 +1,3 @@
-"""
-models/rul_model.py
-
-Fits a capacity-fade curve per vehicle from telemetry history and
-extrapolates Remaining Useful Life (RUL) — the cycle count until the
-battery is projected to cross the end-of-life capacity threshold.
-
-Deliberately simple by design, not by compromise: the simulator
-generates capacity fade from a known exponential decay function, so a
-lightweight curve fit (scipy.optimize.curve_fit) recovers it almost
-perfectly, and — unlike a black-box model — the fitted parameters
-(decay rate, R²) stay directly explainable in the agent's reasoning
-and the dashboard, which is what the project's judging criteria (§10)
-actually reward.
-
-Independent of simulator/config.py on purpose: models/ should work
-against whatever is in SQLite regardless of whether it came from the
-simulator or, eventually, real BLE-connected hardware. The
-end-of-life threshold defaults to 70% to match the simulator's
-assumption but is a plain parameter here, not an import.
-"""
-
 from __future__ import annotations
 
 import sqlite3
@@ -35,7 +13,7 @@ MIN_POINTS_FOR_FIT = 5
 
 
 def _exp_decay(cycle: np.ndarray, a: float, b: float) -> np.ndarray:
-    """Capacity fade model: capacity_pct(cycle) = a * exp(-b * cycle)."""
+    #Capacity fade model: capacity_pct(cycle) = a * exp(-b * cycle).
     return a * np.exp(-b * cycle)
 
 
@@ -60,13 +38,10 @@ class RULModel:
     def __init__(self, end_of_life_capacity_pct: float = DEFAULT_END_OF_LIFE_CAPACITY_PCT):
         self.end_of_life_capacity_pct = end_of_life_capacity_pct
 
-    # ------------------------------------------------------------------
-    # Status banding — kept as simple, explainable thresholds on current
-    # capacity relative to end-of-life, not a hidden model output.
-    # ------------------------------------------------------------------
+    # Status banding — kept as simple, explainable thresholds on current capacity relative to end-of-life, not a hidden model output.
     def _status_from_capacity(self, current_capacity_pct: float) -> str:
         eol = self.end_of_life_capacity_pct
-        margin = 100.0 - eol  # e.g. 30 points of headroom between 100% and 70%
+        margin = 100.0 - eol
         if current_capacity_pct <= eol:
             return "critical"
         elif current_capacity_pct <= eol + margin * 0.33:   # within ~10pt of EOL
@@ -75,9 +50,7 @@ class RULModel:
             return "watch"
         return "healthy"
 
-    # ------------------------------------------------------------------
     # Core fit — single vehicle
-    # ------------------------------------------------------------------
     def fit_vehicle(self, vehicle_id: str, telemetry_rows: List[sqlite3.Row]) -> RULResult:
         if len(telemetry_rows) < MIN_POINTS_FOR_FIT:
             return RULResult(
@@ -108,8 +81,6 @@ class RULModel:
             r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
         except (RuntimeError, ValueError):
-            # Fit didn't converge — fall back to reporting current state only,
-            # rather than emitting a fabricated RUL number.
             return RULResult(
                 vehicle_id=vehicle_id,
                 status="no_fit",
@@ -121,8 +92,6 @@ class RULModel:
         eol_cycle: Optional[float]
         rul_cycles: Optional[float]
         if b <= 1e-6 or a <= self.end_of_life_capacity_pct:
-            # No measurable decay trend, or curve already starts at/below EOL —
-            # don't extrapolate a misleading number.
             eol_cycle = None
             rul_cycles = None
         else:
@@ -142,9 +111,6 @@ class RULModel:
             end_of_life_capacity_pct=self.end_of_life_capacity_pct,
         )
 
-    # ------------------------------------------------------------------
-    # Fleet-wide fit — reads straight from SQLite via ingestion/db.py
-    # ------------------------------------------------------------------
     def fit_fleet(self, conn: sqlite3.Connection) -> pd.DataFrame:
         from ingestion.db import get_all_vehicle_ids, get_telemetry_for_vehicle
 
@@ -157,10 +123,6 @@ class RULModel:
 
 
 if __name__ == "__main__":
-    # Standalone sanity check: seed a scratch DB from the simulator, fit RUL
-    # for every vehicle, and print a summary — including a comparison against
-    # the simulator's true injected decay rate, since we have that as ground
-    # truth here (real deployments won't).
     import os
 
     from ingestion.db import (

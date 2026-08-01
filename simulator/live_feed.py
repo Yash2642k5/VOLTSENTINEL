@@ -53,9 +53,6 @@ class LiveTelemetryFeed:
         return max(0.0, -math.log(ratio) / decay_rate)
 
     def prime_from_db(self, conn) -> None:
-        """Reads each vehicle's latest telemetry row and live-state row
-        (if any), so new cycles/positions continue where the DB left off
-        instead of restarting fresh."""
         from ingestion.db import get_latest_telemetry_for_vehicle, get_vehicle_live_state
 
         for vid in self.tgen.vehicle_ids:

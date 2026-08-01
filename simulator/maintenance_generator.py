@@ -60,8 +60,6 @@ class MaintenanceGenerator:
     def generate_fleet_tickets(
         self, vehicle_time_bounds: Dict[str, Tuple[datetime, datetime]]
     ) -> pd.DataFrame:
-        """vehicle_time_bounds: {vehicle_id: (first_ts, last_ts)}, typically from
-        TelemetryGenerator.get_vehicle_time_bounds(fleet_telemetry_df)."""
         all_tickets = []
         for vid, bounds in vehicle_time_bounds.items():
             all_tickets.extend(self.generate_vehicle_tickets(vid, bounds))
@@ -73,7 +71,6 @@ class MaintenanceGenerator:
 
 
 if __name__ == "__main__":
-    # Standalone sanity check — requires telemetry_generator to build time bounds.
     from simulator.telemetry_generator import TelemetryGenerator
 
     tgen = TelemetryGenerator()

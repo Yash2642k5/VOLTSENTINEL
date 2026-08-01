@@ -1,7 +1,3 @@
-"""Data-quality checks — missing-cycle gaps, stale-sensor flags, and
-out-of-range sensor values. Feeds risk_engine.py's fleet profile as an
-independent risk signal, alongside RUL/thermal/security/charging."""
-
 from __future__ import annotations
 
 import sqlite3
@@ -12,8 +8,6 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 DEFAULT_STALE_HOURS = 48.0
-# capacity shouldn't meaningfully increase cycle-over-cycle; set well above the
-# simulator's own capacity_noise_std_pct so routine noise doesn't trip this check
 DEFAULT_CAPACITY_INCREASE_JUMP_PCT = 8.0
 DEFAULT_TEMPERATURE_RANGE_C: Tuple[float, float] = (-20.0, 120.0)
 DEFAULT_VOLTAGE_RANGE_V: Tuple[float, float] = (0.0, 1000.0)

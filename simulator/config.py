@@ -78,8 +78,6 @@ class SimulatorConfig:
     attack_injection_rate_pct: float = 0.08   # fraction of vehicles that get >=1 attack event
     attacks_per_affected_vehicle: Tuple[int, int] = (1, 3)  # (min, max) attack events
 
-    # individual attack signal toggles/weights — used to vary which
-    # suspicious signal(s) a given injected attack exhibits
     attack_no_ticket_weight: float = 1.0       # always true for injected attacks
     attack_gps_mismatch_probability: float = 0.7   # vehicle shown away from any depot
     attack_road_gps_jitter_deg: float = 0.05       # spread of "in traffic" coordinates
@@ -120,7 +118,7 @@ class SimulatorConfig:
     vehicle_warranty_years: float = 3.0
     vehicle_age_range_days: Tuple[int, int] = (60, 1460)
 
-    # Output paths (relative to project root)
+    # Output paths
 
     seed_dir: str = "data/seed"
     seed_telemetry_filename: str = "sample_telemetry.csv"

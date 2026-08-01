@@ -1,26 +1,3 @@
-"""
-models/anomaly_detector.py
-
-Two independent anomaly layers, per the project doc's §7.1/§7.2 split:
-
-  1. Command/security anomalies — flags BMS commands showing signs of
-     unauthorized use (Tirri Challenge mechanics): no matching
-     maintenance ticket, GPS inconsistent with any known depot, or a
-     frequency spike for that vehicle.
-
-  2. Thermal anomalies — flagged purely from temperature telemetry,
-     independent of command data.
-
-This module only flags and scores; it does NOT decide what action to
-take. That's the agent decision layer's job (Phase 4) — keeping
-detection and decision separate is what makes the reasoning auditable.
-
-Rule-based logic is the primary detector, exactly as specified in
-§5.1 ("Rule-based logic, optionally supplemented with... IsolationForest").
-IsolationForest is included as an optional secondary signal, not a
-replacement for the explainable rules.
-"""
-
 from __future__ import annotations
 
 import math
@@ -31,9 +8,6 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-# Default depot locations — mirrors simulator/config.py's defaults so the
-# detector works out of the box against simulated data, but is a plain
-# parameter (not an import) so models/ stays decoupled from simulator/.
 DEFAULT_DEPOT_LOCATIONS: Tuple[Tuple[float, float], ...] = (
     (12.9716, 77.5946),   # Bengaluru
     (28.7041, 77.1025),   # Delhi
@@ -81,9 +55,7 @@ class AnomalyDetector:
         self.critical_temp_c = critical_temp_c
         self.abnormal_ramp_c_per_min = abnormal_ramp_c_per_min
 
-    # ------------------------------------------------------------------
     # Command / security anomalies
-    # ------------------------------------------------------------------
     def detect_command_anomalies(self, commands_df: pd.DataFrame) -> pd.DataFrame:
         """commands_df: rows from ingestion.db.get_commands_for_vehicle /
         get_all commands, with at least vehicle_id, timestamp, latitude,
@@ -101,35 +73,8 @@ class AnomalyDetector:
 
         df = commands_df.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
-        # format="ISO8601": this column can contain a MIX of naive strings
-        # (simulator-seeded rows, e.g. "2026-01-03T02:25:23.626357") and
-        # tz-aware strings (live attack_trigger.py injections, e.g.
-        # "...+00:00") once the dashboard's "Simulate Attack" button has been
-        # used against a seeded DB. pandas' default to_datetime() infers a
-        # single format from the first rows and raises ValueError the moment a
-        # row does not match it; ISO8601 mode parses each value independently
-        # as long as it is valid ISO 8601, which every timestamp this system
-        # ever writes always is.
-        # utc=True: pandas additionally refuses to represent a mix of naive
-        # and tz-aware values in one column at all ("Mixed timezones
-        # detected...") unless told how to reconcile them -- utc=True converts
-        # every value to a common UTC representation first. The tz_localize(None)
-        # call right below then strips that down to naive-but-UTC-normalized,
-        # which is what every comparison later in this function assumes.
-        # Real (non-simulated) clients may send timezone-aware timestamps
-        # (e.g. attack_trigger.py's live injections use datetime.now(timezone.utc)).
-        # pandas' Series.values silently drops tz info on tz-aware columns, so the
-        # per-row pd.Timestamp(...) reconstruction in the frequency-spike loop below
-        # would otherwise come back naive and raise "Invalid comparison" against this
-        # still-tz-aware column. Normalize once, here, so every downstream comparison
-        # in this function operates on consistently naive timestamps regardless of
-        # whether the source was the simulator (already naive) or a live/real client.
         if df["timestamp"].dt.tz is not None:
             df["timestamp"] = df["timestamp"].dt.tz_localize(None)
-        # Sort for windowed frequency calc, but deliberately keep the original
-        # index intact (no reset_index) so any index-based join a caller does
-        # afterwards — e.g. reattaching a ground-truth column — stays aligned
-        # to the correct row instead of silently pairing by position.
         df = df.sort_values(["vehicle_id", "timestamp"])
 
         # Signal 1: no matching maintenance ticket
@@ -143,8 +88,7 @@ class AnomalyDetector:
             axis=1,
         )
 
-        # Signal 3: frequency spike — count of commands for that vehicle in the
-        # trailing window (including the command itself)
+        # Signal 3: frequency spike — count of commands for that vehicle in the trailing window
         window = pd.Timedelta(minutes=self.frequency_window_minutes)
         spike_flags = []
         for vid, group in df.groupby("vehicle_id"):
@@ -158,9 +102,6 @@ class AnomalyDetector:
         spike_map = dict(spike_flags)
         df["frequency_spike_flag"] = df.index.map(spike_map)
 
-        # Combined, explainable scoring — no hidden weighting. The agent
-        # layer (Phase 4) decides what to do with this; this just counts
-        # how many independent signals fired.
         df["signal_count"] = (
             df["no_ticket_flag"].astype(int)
             + df["gps_mismatch_flag"].astype(int)
@@ -170,9 +111,7 @@ class AnomalyDetector:
 
         return df
 
-    # ------------------------------------------------------------------
     # Thermal anomalies — independent of command data
-    # ------------------------------------------------------------------
     def detect_thermal_anomalies(self, telemetry_df: pd.DataFrame) -> pd.DataFrame:
         """telemetry_df: rows with at least vehicle_id, cycle, timestamp,
         temperature_c. Returns the same rows with thermal flags added.
@@ -188,29 +127,8 @@ class AnomalyDetector:
 
         df = telemetry_df.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
-        # format="ISO8601": this column can contain a MIX of naive strings
-        # (simulator-seeded rows, e.g. "2026-01-03T02:25:23.626357") and
-        # tz-aware strings (live attack_trigger.py injections, e.g.
-        # "...+00:00") once the dashboard's "Simulate Attack" button has been
-        # used against a seeded DB. pandas' default to_datetime() infers a
-        # single format from the first rows and raises ValueError the moment a
-        # row does not match it; ISO8601 mode parses each value independently
-        # as long as it is valid ISO 8601, which every timestamp this system
-        # ever writes always is.
-        # utc=True: pandas additionally refuses to represent a mix of naive
-        # and tz-aware values in one column at all ("Mixed timezones
-        # detected...") unless told how to reconcile them -- utc=True converts
-        # every value to a common UTC representation first. The tz_localize(None)
-        # call right below then strips that down to naive-but-UTC-normalized,
-        # which is what every comparison later in this function assumes.
-        # Same normalization as detect_command_anomalies, applied here defensively —
-        # the ramp calc below only ever diffs two values pulled through the same
-        # .values -> pd.Timestamp path so it happens not to be broken by tz-aware
-        # input today, but keeping this column naive is what keeps it that way if
-        # this function ever compares df["timestamp"] against an external Timestamp.
         if df["timestamp"].dt.tz is not None:
             df["timestamp"] = df["timestamp"].dt.tz_localize(None)
-        # Same reasoning as detect_command_anomalies: keep original index intact.
         df = df.sort_values(["vehicle_id", "cycle"])
 
         df["sustained_high_temp_flag"] = df["temperature_c"] >= self.safe_temp_c
@@ -220,7 +138,7 @@ class AnomalyDetector:
         for vid, group in df.groupby("vehicle_id"):
             temps = group["temperature_c"].values
             times = group["timestamp"].values
-            flags = [False]  # first reading has no prior point to compare against
+            flags = [False]
             for i in range(1, len(temps)):
                 dt_minutes = (pd.Timestamp(times[i]) - pd.Timestamp(times[i - 1])).total_seconds() / 60.0
                 if dt_minutes <= 0:
@@ -238,10 +156,8 @@ class AnomalyDetector:
 
         return df
 
-    # ------------------------------------------------------------------
-    # Optional supplemental signal — IsolationForest over telemetry features.
-    # Secondary only: never the primary detector, per §5.1.
-    # ------------------------------------------------------------------
+    #supplemental signal — IsolationForest over telemetry features.
+
     def fit_isolation_forest_scores(
         self, telemetry_df: pd.DataFrame,
         features: Tuple[str, ...] = ("temperature_c", "voltage", "soc_pct", "dod_pct"),
@@ -261,9 +177,6 @@ class AnomalyDetector:
 
 
 if __name__ == "__main__":
-    # Standalone sanity check: fresh simulator data, run both detectors,
-    # and compare against simulator ground truth (is_attack / thermal_event_flag)
-    # purely to sanity-check detector behaviour — never done in production logic.
     from simulator.config import SimulatorConfig
     from simulator.telemetry_generator import TelemetryGenerator
     from simulator.maintenance_generator import MaintenanceGenerator

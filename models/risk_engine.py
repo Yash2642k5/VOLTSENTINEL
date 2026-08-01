@@ -1,23 +1,3 @@
-"""
-models/risk_engine.py
-
-Merges the three parallel analytical layers — RUL (rul_model.py),
-command/thermal anomalies (anomaly_detector.py), and charging patterns
-(charging_analyzer.py) — into a single per-asset risk profile.
-
-This is the "converge into a merged per-asset risk profile" step from
-§5 of the project doc, and it's the direct input to the agent decision
-layer's "Perceive" step in Phase 4 (agent/decision_engine.py).
-
-Important: this module aggregates and summarizes signals — it does
-NOT decide what action to take. The `overall_risk_level` computed here
-is a simple, transparent banding meant to help a human skim the fleet
-view; the agent layer is what actually reasons over the full profile
-and emits maintenance triggers, charge policies, or escalations. Kept
-separate on purpose, matching the doc's Perceive -> Reason -> Decide -> Act
-split (§6.1).
-"""
-
 from __future__ import annotations
 
 import sqlite3
@@ -44,7 +24,6 @@ class RiskEngine:
         self.charging_analyzer = charging_analyzer or ChargingAnalyzer()
         self.data_quality_analyzer = data_quality_analyzer or DataQualityAnalyzer()
 
-    # ------------------------------------------------------------------
     def _aggregate_thermal(self, conn: sqlite3.Connection) -> pd.DataFrame:
         from ingestion.db import get_all_vehicle_ids, get_telemetry_for_vehicle
 
@@ -54,7 +33,7 @@ class RiskEngine:
             telem_df = pd.DataFrame([dict(r) for r in telemetry_rows])
             if telem_df.empty:
                 rows.append({"vehicle_id": vid, "thermal_anomaly_count": 0,
-                             "critical_temp_count": 0, "latest_temp_c": None})
+                                "critical_temp_count": 0, "latest_temp_c": None})
                 continue
 
             result = self.anomaly_detector.detect_thermal_anomalies(telem_df)
@@ -91,11 +70,7 @@ class RiskEngine:
             })
         return pd.DataFrame(rows)
 
-    # ------------------------------------------------------------------
     def _overall_risk_level(self, row: pd.Series) -> str:
-        """Simple, transparent banding for fleet-view skimming — counts how
-        many domains show a concerning signal. NOT the agent's decision;
-        the agent (Phase 4) reasons over the full profile independently."""
         concerns = 0
         if row.get("status") in ("degraded", "critical"):
             concerns += 1
@@ -133,15 +108,6 @@ class RiskEngine:
 
     def build_fleet_profile(self, conn: sqlite3.Connection) -> pd.DataFrame:
         from ingestion.db import get_all_vehicle_ids
-
-        # An empty DB (nothing ingested yet, or freshly created) means every
-        # per-model DataFrame below comes back as pd.DataFrame([]) — which has
-        # NO columns at all, not even vehicle_id. Merging on "vehicle_id" in
-        # that state raises KeyError instead of just producing an empty
-        # profile. Short-circuit here so the dashboard's existing "No
-        # vehicles in the fleet profile yet" empty-state message (already
-        # handled downstream in fleet_map.py / utils.py) actually gets a
-        # chance to render, instead of the whole page crashing first.
         if not get_all_vehicle_ids(conn):
             return pd.DataFrame(columns=self._EMPTY_PROFILE_COLUMNS)
 

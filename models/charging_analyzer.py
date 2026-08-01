@@ -1,30 +1,3 @@
-"""
-models/charging_analyzer.py
-
-Analyzes charging behaviour per vehicle — fast-charge frequency, depth-
-of-discharge (DoD) habits, and charge-rate stress trends over time —
-per §7.3 of the project doc. Purely descriptive statistics; no ML
-needed here, since the signal itself (frequency/averages) is already
-the explainable output the agent layer and dashboard want.
-
-Feeds two consumers:
-  - models/rul_model.py indirectly (charging behaviour is *why* a
-    vehicle degrades faster, RUL just measures *that* it did)
-  - agent/decision_engine.py (Phase 4), which turns
-    `suggested_policy` here into an actual recommend_charge_policy()
-    action. This module proposes; the agent decides.
-
-Future Roadmap Feature 5 — Driver-Level Coaching:
-  Charging behaviour can also be re-aggregated by driver_id instead of
-  vehicle_id, using Feature 1's vehicle_assignments (who was driving
-  this vehicle, and when). analyze_driver()/analyze_fleet_drivers()
-  below reuse the exact same scoring math as analyze_vehicle()/
-  analyze_fleet() — refactored into _compute_charging_stats() — so a
-  driver rotating across several vehicles gets scored on their own
-  combined behaviour instead of being blended into whichever vehicle's
-  aggregate they happen to be driving.
-"""
-
 from __future__ import annotations
 
 import sqlite3
@@ -57,13 +30,6 @@ class ChargingProfile:
 
 @dataclass
 class DriverChargingProfile:
-    """Same charging-behaviour fields as ChargingProfile, but aggregated
-    across every vehicle a driver was actually assigned to during their
-    own shifts (Future Roadmap Feature 5 — Driver-Level Coaching),
-    rather than one vehicle's full history. vehicle_count records how
-    many distinct vehicles fed into this profile, since "40% above
-    baseline across three vehicles" is a meaningfully different claim
-    than the same number from one vehicle."""
     driver_id: str
     vehicle_count: int
     total_cycles: int
@@ -91,8 +57,6 @@ class ChargingAnalyzer:
 
     # ------------------------------------------------------------------
     def _stress_trend(self, is_fast_charge: pd.Series, dod_pct: pd.Series) -> str:
-        """Compares an early window vs the most recent window of the same
-        vehicle's history to see if charging behaviour is getting worse."""
         n = len(dod_pct)
         w = self.trend_window
         if n < w * 2:
@@ -109,9 +73,6 @@ class ChargingAnalyzer:
         return "stable"
 
     def _suggest_policy(self, profile_partial: dict) -> Optional[str]:
-        """Advisory only — the agent layer (Phase 4) is what actually emits
-        recommend_charge_policy(). This just proposes a rationale-backed
-        suggestion so the agent has something concrete to reason over."""
         suggestions = []
         if profile_partial["fast_charge_vs_baseline_pct"] > 15:
             suggestions.append("cap fast-charge frequency")
@@ -126,12 +87,6 @@ class ChargingAnalyzer:
     def _compute_charging_stats(
         self, telemetry_rows: List[sqlite3.Row], fleet_baseline_pct: float
     ) -> dict:
-        """Core charging-behaviour computation, independent of whether the
-        caller is aggregating by vehicle_id (analyze_vehicle) or by
-        driver_id across possibly several vehicles' shift windows
-        (analyze_driver, Future Roadmap Feature 5) — the math doesn't
-        care whose rows they are. This is a pure extraction of what used
-        to live inline in analyze_vehicle; its output is unchanged."""
         if not telemetry_rows:
             return {
                 "total_cycles": 0, "fast_charge_frequency_pct": 0.0,
@@ -150,7 +105,6 @@ class ChargingAnalyzer:
         stress_trend = self._stress_trend(is_fast_charge, dod_pct)
 
         # Composite 0-100 stress score — simple weighted average of three
-        # explainable components, not a hidden model output.
         charge_stress_score = round(
             0.4 * fast_charge_frequency_pct
             + 0.4 * min(mean_dod_pct, 100.0)
@@ -176,22 +130,18 @@ class ChargingAnalyzer:
             "suggested_policy": self._suggest_policy(profile_partial),
         }
 
-    # ------------------------------------------------------------------
     def analyze_vehicle(
         self, vehicle_id: str, telemetry_rows: List[sqlite3.Row], fleet_baseline_pct: float
     ) -> ChargingProfile:
         stats = self._compute_charging_stats(telemetry_rows, fleet_baseline_pct)
         return ChargingProfile(vehicle_id=vehicle_id, **stats)
 
-    # ------------------------------------------------------------------
     def analyze_fleet(self, conn: sqlite3.Connection) -> pd.DataFrame:
         from ingestion.db import get_all_vehicle_ids, get_telemetry_for_vehicle
 
         vehicle_ids = get_all_vehicle_ids(conn)
         all_rows = {vid: get_telemetry_for_vehicle(conn, vid) for vid in vehicle_ids}
 
-        # Fleet baseline computed fresh from actual DB contents, not assumed
-        # from config — stays correct even if the fleet composition changes.
         all_fast_charge = [
             bool(r["is_fast_charge"]) for rows in all_rows.values() for r in rows
         ]
@@ -206,9 +156,7 @@ class ChargingAnalyzer:
         ]
         return pd.DataFrame(results)
 
-    # ------------------------------------------------------------------
-    # Future Roadmap Feature 5 — Driver-Level Coaching
-    # ------------------------------------------------------------------
+    #Driver-Level Coaching
     def analyze_driver(
         self,
         driver_id: str,
@@ -216,46 +164,19 @@ class ChargingAnalyzer:
         fleet_baseline_pct: float,
         vehicle_count: int = 0,
     ) -> DriverChargingProfile:
-        """Same scoring as analyze_vehicle, but over the union of
-        telemetry rows drawn from every vehicle this driver was assigned
-        to during their own shift windows — see analyze_fleet_drivers for
-        how those rows get assembled from vehicle_assignments + telemetry.
-        `telemetry_rows` should already be the driver's own combined,
-        chronologically-sorted rows (analyze_fleet_drivers does this);
-        this method itself stays agnostic to how many vehicles they came
-        from, matching analyze_vehicle's "just take the rows" contract."""
         stats = self._compute_charging_stats(telemetry_rows, fleet_baseline_pct)
         return DriverChargingProfile(driver_id=driver_id, vehicle_count=vehicle_count, **stats)
 
     def analyze_fleet_drivers(self, conn: sqlite3.Connection) -> pd.DataFrame:
-        """Re-aggregates charging behaviour by driver_id instead of
-        vehicle_id. For each driver in Feature 1's driver pool, gathers
-        every telemetry row recorded for a vehicle WHILE that driver was
-        assigned to it (per vehicle_assignments.shift_start/shift_end),
-        across however many different vehicles they drove, concatenates
-        and sorts those rows chronologically, and scores them exactly
-        like analyze_fleet scores a single vehicle's full history.
-
-        Requires Feature 1's drivers/vehicle_assignments tables to be
-        populated — a driver with no assignment history simply won't
-        appear in the result (nothing to aggregate), matching this
-        codebase's existing "absent, not a placeholder" convention (see
-        dashboard/utils.py's get_latest_vehicle_locations)."""
         from ingestion.db import (
             get_all_drivers, get_all_vehicle_ids, get_assignments_for_driver,
             get_telemetry_for_vehicle,
         )
 
         vehicle_ids = get_all_vehicle_ids(conn)
-        # Cache each vehicle's full telemetry once — most vehicles have far
-        # fewer drivers assigned than shifts, so re-querying per-assignment
-        # would repeat the same SELECT many times over.
+
         telemetry_cache = {vid: get_telemetry_for_vehicle(conn, vid) for vid in vehicle_ids}
 
-        # Same fleet-wide baseline analyze_fleet() computes — every
-        # telemetry row in the fleet, not just driver-attributed ones, so
-        # drivers are compared against the same reference point vehicles
-        # already are.
         all_fast_charge = [
             bool(r["is_fast_charge"]) for rows in telemetry_cache.values() for r in rows
         ]

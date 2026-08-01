@@ -23,7 +23,6 @@ class AttackInjector:
 
         for _, ticket in tickets_df.iterrows():
             cmd_type = legit_types[self.rng.integers(0, len(legit_types))]
-            # Legit commands happen right around the ticket time and at the ticket's location
             jitter_minutes = self.rng.uniform(-15, 15)
             ts = pd.to_datetime(ticket["timestamp"]) + timedelta(minutes=jitter_minutes)
 
@@ -39,7 +38,7 @@ class AttackInjector:
             })
         return commands
 
-    # Injected attack commands — Tirri Challenge mechanics
+    # Injected attack commands
     def _random_road_coords(self) -> Tuple[float, float]:
         """Picks a depot as a rough regional anchor, then jitters far enough
         away to represent 'in motion on a public road', not at the depot."""
@@ -56,8 +55,7 @@ class AttackInjector:
         if self.rng.random() < cfg.attack_gps_mismatch_probability:
             lat, lon = self._random_road_coords()
         else:
-            # Rare edge case: attack near a depot but still with no ticket —
-            # keeps the detector honest, since GPS match alone isn't sufficient.
+            #edge case: attack near a depot but still with no ticket.
             depot = cfg.depot_locations[self.rng.integers(0, len(cfg.depot_locations))]
             lat, lon = round(depot[0], 6), round(depot[1], 6)
 
@@ -88,8 +86,6 @@ class AttackInjector:
             base_ts = start + timedelta(seconds=float(self.rng.uniform(0, delta_seconds)))
 
             if self.rng.random() < cfg.attack_frequency_burst_probability:
-                # Frequency-spike attack: several commands fired within a short window,
-                # mirroring pranksters repeatedly toggling the app.
                 burst_count = int(self.rng.integers(
                     cfg.attack_burst_command_count[0],
                     cfg.attack_burst_command_count[1] + 1,
@@ -135,8 +131,6 @@ class AttackInjector:
 
 
 if __name__ == "__main__":
-    # Standalone end-to-end run: telemetry -> tickets -> command stream,
-    # then dump all three to data/seed/ as the demo-safety-net CSVs.
     import os
 
     from .telemetry_generator import TelemetryGenerator

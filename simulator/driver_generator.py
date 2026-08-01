@@ -16,7 +16,6 @@ class DriverGenerator:
         self.rng = np.random.default_rng(config.random_seed + 3)
         self._driver_pool: List[dict] = self._generate_driver_pool()
 
-    # ------------------------------------------------------------------
     def _generate_driver_pool(self) -> List[dict]:
         cfg = self.config
         depot_names = [f"Depot {i + 1}" for i in range(len(cfg.depot_locations))]
@@ -36,7 +35,6 @@ class DriverGenerator:
     def get_driver_pool(self) -> List[dict]:
         return list(self._driver_pool)
 
-    # ------------------------------------------------------------------
     def generate_vehicle_assignments(
         self, vehicle_id: str, time_bounds: Tuple[datetime, datetime]
     ) -> List[dict]:
@@ -83,7 +81,6 @@ class DriverGenerator:
 
 
 if __name__ == "__main__":
-    # Standalone sanity check — requires telemetry_generator to build time bounds.
     from simulator.telemetry_generator import TelemetryGenerator
 
     tgen = TelemetryGenerator()

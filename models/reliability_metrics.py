@@ -1,6 +1,3 @@
-"""MTBF/MTTR reliability metrics, computed from agent-flagged maintenance
-triggers (agent_actions) and telemetry timestamps — no new ingestion."""
-
 from __future__ import annotations
 
 import sqlite3
@@ -47,9 +44,6 @@ class ReliabilityAnalyzer:
         mttr_hours = None
         if trigger_ts:
             telemetry_ts = sorted(_parse_ts(r["timestamp"]) for r in get_telemetry_for_vehicle(conn, vehicle_id))
-            # a maintenance trigger's "repair time" is approximated as the telemetry
-            # gap straddling it — the span between the last reading before the fault
-            # was flagged and the first reading once the vehicle is back online.
             repair_gaps = []
             for t in trigger_ts:
                 before = [ts for ts in telemetry_ts if ts <= t]

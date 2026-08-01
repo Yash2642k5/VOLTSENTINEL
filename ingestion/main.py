@@ -1,16 +1,3 @@
-"""
-ingestion/main.py
-
-FastAPI application entrypoint. Assembles db.py (storage) and
-routes.py (REST/WebSocket endpoints) into a runnable service, and
-creates tables on startup if they don't already exist.
-
-Run directly:
-    python -m ingestion.main
-or with reload during development:
-    uvicorn ingestion.main:app --reload
-"""
-
 from __future__ import annotations
 
 from fastapi import FastAPI

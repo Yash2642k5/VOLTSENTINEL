@@ -1,20 +1,3 @@
-"""
-ingestion/routes.py
-
-REST and WebSocket endpoints for VoltSentinel's ingestion service.
-This is the boundary where simulator output (or, eventually, real
-BLE-connected BMS hardware) enters the system:
-
-REST  — bulk-load a whole simulator run in one request (typical dev/demo flow).
-WS    — stream individual events one at a time (the live "Simulate Attack"
-        trigger from the dashboard's attack_trigger.py component).
-
-Every request body is validated against schemas.py before touching the
-database, and every write goes through db.py's insert_* helpers, so the
-same idempotency/uniqueness guarantees tested in test_ingestion.py hold
-here too.
-"""
-
 from __future__ import annotations
 
 import sqlite3
@@ -37,10 +20,6 @@ from .schemas import (
 
 router = APIRouter()
 
-
-# ----------------------------------------------------------------------
-# DB dependency — fresh connection per request, always closed after
-# ----------------------------------------------------------------------
 def get_db() -> Generator[sqlite3.Connection, None, None]:
     conn = db_module.get_connection()
     try:
@@ -48,10 +27,6 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
     finally:
         conn.close()
 
-
-# ----------------------------------------------------------------------
-# REST — bulk ingestion (typical flow: load a full simulator run)
-# ----------------------------------------------------------------------
 @router.post("/telemetry", response_model=IngestionAck, tags=["ingestion"])
 def ingest_telemetry(batch: TelemetryBatch, conn: sqlite3.Connection = Depends(get_db)) -> IngestionAck:
     try:
@@ -75,17 +50,11 @@ def ingest_commands(batch: CommandBatch, conn: sqlite3.Connection = Depends(get_
     try:
         inserted = db_module.insert_command_batch(conn, batch.commands)
     except sqlite3.IntegrityError as e:
-        # Most likely a ticket_id that doesn't exist yet — commands referencing
-        # a ticket must be ingested after that ticket, since it's a real FK.
         raise HTTPException(status_code=400, detail=f"integrity error (check ticket_id exists): {e}")
     except sqlite3.Error as e:
         raise HTTPException(status_code=500, detail=f"database error: {e}")
     return IngestionAck(records_received=len(batch.commands), records_inserted=inserted)
 
-
-# ----------------------------------------------------------------------
-# REST — read endpoints (consumed by models/ and dashboard/)
-# ----------------------------------------------------------------------
 @router.get("/vehicles", response_model=List[str], tags=["query"])
 def list_vehicles(conn: sqlite3.Connection = Depends(get_db)) -> List[str]:
     return db_module.get_all_vehicle_ids(conn)
@@ -122,10 +91,7 @@ def unticketed_commands(
 def stats(conn: sqlite3.Connection = Depends(get_db)) -> dict:
     return db_module.row_counts(conn)
 
-
-# ----------------------------------------------------------------------
-# WebSocket — live single-event streaming (dashboard "Simulate Attack" trigger)
-# ----------------------------------------------------------------------
+# WebSocket — live single-event streaming
 _STREAM_HANDLERS = {
     StreamMessageType.TELEMETRY: (TelemetryReading, db_module.insert_telemetry),
     StreamMessageType.MAINTENANCE: (MaintenanceTicket, db_module.insert_maintenance_ticket),
@@ -156,8 +122,6 @@ async def stream_events(websocket: WebSocket) -> None:
             except WebSocketDisconnect:
                 raise
             except Exception as e:
-                # A malformed single frame shouldn't kill the whole stream —
-                # report it and keep listening for the next event.
                 await websocket.send_json(
                     IngestionAck(status="error", records_received=1, errors=[str(e)]).model_dump()
                 )

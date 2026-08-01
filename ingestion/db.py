@@ -1,11 +1,4 @@
 """
-ingestion/db.py
-
-SQLite connection helpers and table creation, matching the shapes
-defined in schemas.py exactly. routes.py writes simulator/live data in
-through the insert_* functions here; models/ (Phase 3) reads it back
-out through the get_* functions.
-
 Tables:
     telemetry            <- TelemetryReading
     maintenance_tickets  <- MaintenanceTicket
@@ -14,23 +7,6 @@ Tables:
     rejected_commands    <- audit trail of commands rejected due to quarantine
     drivers              <- Driver (Future Roadmap Feature 1)
     vehicle_assignments  <- VehicleAssignment (Feature 1; driver_id FK -> drivers)
-
-Inserts use INSERT OR IGNORE against natural unique keys, so re-running
-ingestion on the same simulator output (e.g. during dev/demo rehearsal)
-is idempotent instead of raising or duplicating rows.
-
-Quarantine enforcement: if a vehicle is quarantined (vehicle_quarantine.active
-= 1), insert_command / insert_command_batch reject any INCOMING command for
-that vehicle that has no matching maintenance ticket — real enforcement at
-the ingestion boundary, not just a detection flag applied after the fact.
-A ticketed command (a real technician visit) always still goes through,
-quarantine or not.
-
-Driver identity / vehicle assignment (Feature 1): purely additive on top
-of the above — nothing here changes how telemetry/commands/tickets are
-stored or enforced. drivers/vehicle_assignments exist so a "who was
-driving this vehicle, and when" dimension can be looked up alongside the
-existing vehicle-only signals, not to replace them.
 """
 
 from __future__ import annotations
@@ -46,34 +22,14 @@ from .schemas import (
 
 DB_PATH = os.path.join("data", "voltsentinel.db")
 
-
-# ----------------------------------------------------------------------
-# Connection
-# ----------------------------------------------------------------------
 def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    # check_same_thread=False: dashboard/utils.py wraps this connection in
-    # st.cache_resource, so the SAME connection object is reused across every
-    # Streamlit rerun -- including the rerun triggered by a widget callback
-    # (e.g. the "Simulate Attack" button), which Streamlit executes on a
-    # different thread than the one that first created this connection.
-    # sqlite3 refuses cross-thread use by default. Safe to disable that check
-    # here specifically because Streamlit processes reruns for a given
-    # session sequentially, never concurrently, so there is no risk of two
-    # threads touching the connection at the same instant.
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    # WAL: lets a live-feed process (scripts/live_feed.py) append rows while
-    # the dashboard holds its own connection open on the same file, instead
-    # of readers/writers blocking each other under the default journal mode.
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
-
-# ----------------------------------------------------------------------
-# Schema creation
-# ----------------------------------------------------------------------
 _CREATE_TELEMETRY = """
 CREATE TABLE IF NOT EXISTS telemetry (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,9 +75,6 @@ CREATE TABLE IF NOT EXISTS commands (
 );
 """
 
-# ----------------------------------------------------------------------
-# Tier 3 — quarantine / circuit-breaker schema
-# ----------------------------------------------------------------------
 _CREATE_QUARANTINE = """
 CREATE TABLE IF NOT EXISTS vehicle_quarantine (
     vehicle_id      TEXT PRIMARY KEY,
@@ -145,10 +98,6 @@ CREATE TABLE IF NOT EXISTS rejected_commands (
     rejected_at     TEXT NOT NULL
 );
 """
-
-# ----------------------------------------------------------------------
-# Driver identity / vehicle assignment schema (Future Roadmap Feature 1)
-# ----------------------------------------------------------------------
 _CREATE_DRIVERS = """
 CREATE TABLE IF NOT EXISTS drivers (
     driver_id       TEXT PRIMARY KEY,
@@ -168,10 +117,6 @@ CREATE TABLE IF NOT EXISTS vehicle_assignments (
     FOREIGN KEY (driver_id) REFERENCES drivers(driver_id)
 );
 """
-
-# ----------------------------------------------------------------------
-# Asset registry — vehicle make/model/VIN/purchase/warranty
-# ----------------------------------------------------------------------
 _CREATE_VEHICLES = """
 CREATE TABLE IF NOT EXISTS vehicles (
     vehicle_id              TEXT PRIMARY KEY,
@@ -183,12 +128,6 @@ CREATE TABLE IF NOT EXISTS vehicles (
 );
 """
 
-# ----------------------------------------------------------------------
-# Live vehicle state — current position + activity, written by
-# scripts/live_feed.py every tick. Separate from `commands` (sparse BMS
-# events) since this is a continuous, always-current "where is it and is
-# it moving" signal.
-# ----------------------------------------------------------------------
 _CREATE_VEHICLE_LIVE_STATE = """
 CREATE TABLE IF NOT EXISTS vehicle_live_state (
     vehicle_id      TEXT PRIMARY KEY,
@@ -227,10 +166,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
     conn.commit()
 
-
-# ----------------------------------------------------------------------
-# Insert helpers — telemetry
-# ----------------------------------------------------------------------
 def _ts(value: datetime) -> str:
     return value.isoformat()
 
@@ -272,12 +207,8 @@ def insert_telemetry_batch(conn: sqlite3.Connection, readings: Iterable[Telemetr
         rows,
     )
     conn.commit()
-    return conn.total_changes - before  # actual rows inserted, excluding duplicates skipped by OR IGNORE
+    return conn.total_changes - before
 
-
-# ----------------------------------------------------------------------
-# Insert helpers — maintenance tickets
-# ----------------------------------------------------------------------
 def insert_maintenance_ticket(conn: sqlite3.Connection, ticket: MaintenanceTicket) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO maintenance_tickets
@@ -304,21 +235,7 @@ def insert_maintenance_batch(conn: sqlite3.Connection, tickets: Iterable[Mainten
     conn.commit()
     return conn.total_changes - before
 
-
-# ----------------------------------------------------------------------
-# Insert helpers — commands
-#
-# Both functions now check vehicle_quarantine before writing. An unticketed
-# command for a currently-quarantined vehicle is rejected outright (logged
-# to rejected_commands instead of commands) — this is the Tier 3 circuit
-# breaker actually taking effect at the ingestion boundary, not merely a
-# detection flag applied after the write. A ticketed command (a real
-# technician visit) always still lands, quarantine or not.
-# ----------------------------------------------------------------------
 def insert_command(conn: sqlite3.Connection, command: CommandEvent) -> bool:
-    """Returns True if the command was written to `commands`, False if it
-    was rejected because the vehicle is quarantined and the command has no
-    matching maintenance ticket."""
     if command.ticket_id is None and is_vehicle_quarantined(conn, command.vehicle_id):
         log_rejected_command(conn, command, "vehicle is quarantined; command has no maintenance ticket")
         conn.commit()
@@ -341,9 +258,6 @@ def insert_command(conn: sqlite3.Connection, command: CommandEvent) -> bool:
 
 
 def insert_command_batch(conn: sqlite3.Connection, commands: Iterable[CommandEvent]) -> int:
-    """Returns the number of rows actually inserted into `commands` (same
-    contract as before: excludes both OR-IGNORE duplicates AND anything
-    rejected by quarantine enforcement below)."""
     accepted: List[CommandEvent] = []
     for c in commands:
         if c.ticket_id is None and is_vehicle_quarantined(conn, c.vehicle_id):
@@ -370,10 +284,6 @@ def insert_command_batch(conn: sqlite3.Connection, commands: Iterable[CommandEve
     conn.commit()
     return conn.total_changes - before
 
-
-# ----------------------------------------------------------------------
-# Quarantine CRUD — Tier 3 circuit breaker
-# ----------------------------------------------------------------------
 def is_vehicle_quarantined(conn: sqlite3.Connection, vehicle_id: str) -> bool:
     row = conn.execute(
         "SELECT active FROM vehicle_quarantine WHERE vehicle_id = ?", (vehicle_id,)
@@ -384,10 +294,6 @@ def is_vehicle_quarantined(conn: sqlite3.Connection, vehicle_id: str) -> bool:
 def set_vehicle_quarantine(
     conn: sqlite3.Connection, vehicle_id: str, reason: str, action_id: Optional[str] = None
 ) -> dict:
-    """Imposes (or re-imposes) quarantine. Idempotent — calling this on an
-    already-quarantined vehicle refreshes the reason/action_id rather than
-    erroring, since a second high-severity escalation on an
-    already-quarantined asset is a normal occurrence, not a bug."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """INSERT INTO vehicle_quarantine
@@ -405,11 +311,6 @@ def set_vehicle_quarantine(
 def release_vehicle_quarantine(
     conn: sqlite3.Connection, vehicle_id: str, released_by: str
 ) -> Optional[dict]:
-    """Returns None if the vehicle wasn't actively quarantined. released_by
-    is required — this is the human-accountability trail for a decision
-    the agent's LLM is never allowed to make itself (release is deliberately
-    excluded from agent/prompts.py's ACTION_TYPES and agent/actions.py's
-    ACTION_DISPATCH)."""
     now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         """UPDATE vehicle_quarantine SET active = 0, released_at = ?, released_by = ?
@@ -452,14 +353,6 @@ def get_rejected_commands(conn: sqlite3.Connection, vehicle_id: Optional[str] = 
         ).fetchall()
     return conn.execute("SELECT * FROM rejected_commands ORDER BY rejected_at DESC").fetchall()
 
-
-# ----------------------------------------------------------------------
-# Insert helpers — drivers & vehicle assignments (Future Roadmap Feature 1)
-#
-# Same INSERT OR IGNORE idempotency pattern as everything above: a driver
-# pool is generated/inserted once per seed run, and re-running seeding
-# against an already-populated DB must not raise or duplicate rows.
-# ----------------------------------------------------------------------
 def insert_driver(conn: sqlite3.Connection, driver: Driver) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO drivers (driver_id, name, license_id, depot_home)
@@ -513,10 +406,6 @@ def insert_vehicle_assignment_batch(
     conn.commit()
     return conn.total_changes - before
 
-
-# ----------------------------------------------------------------------
-# Query helpers — drivers & vehicle assignments
-# ----------------------------------------------------------------------
 def get_all_drivers(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     return conn.execute("SELECT * FROM drivers ORDER BY driver_id").fetchall()
 
@@ -544,13 +433,6 @@ def get_assignments_for_driver(conn: sqlite3.Connection, driver_id: str) -> List
 def get_current_assignment_for_vehicle(
     conn: sqlite3.Connection, vehicle_id: str
 ) -> Optional[sqlite3.Row]:
-    """'Current' = the most recent assignment by shift_start. This is the
-    right definition for simulator-generated historical assignment
-    windows (there's no live wall-clock shift happening 'right now' in a
-    batch-seeded demo DB). A live deployment would instead want to filter
-    on shift_end IS NULL / shift_start <= now <= shift_end — that
-    refinement naturally belongs alongside Feature 2 (Live SoC / range
-    tile), once "now" is a meaningful concept for this dashboard at all."""
     return conn.execute(
         """SELECT * FROM vehicle_assignments WHERE vehicle_id = ?
             ORDER BY shift_start DESC LIMIT 1""",
@@ -559,12 +441,6 @@ def get_current_assignment_for_vehicle(
 
 
 def get_current_driver_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) -> Optional[dict]:
-    """Joins the vehicle's most recent assignment with drivers into a
-    plain, already-flattened dict — convenient for dashboard/utils.py's
-    cached queries, which can't return a raw sqlite3.Row across a
-    st.cache_data boundary as easily as a plain dict. Returns None if the
-    vehicle has no assignment history yet (e.g. seeded before Feature 1
-    existed) rather than fabricating a placeholder driver."""
     assignment = get_current_assignment_for_vehicle(conn, vehicle_id)
     if assignment is None:
         return None
@@ -581,10 +457,6 @@ def get_current_driver_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) ->
         "shift_end": assignment["shift_end"],
     }
 
-
-# ----------------------------------------------------------------------
-# Insert/query helpers — asset registry
-# ----------------------------------------------------------------------
 def insert_vehicle_metadata(conn: sqlite3.Connection, vehicle: VehicleMetadata) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO vehicles
@@ -622,10 +494,6 @@ def get_vehicle_metadata(conn: sqlite3.Connection, vehicle_id: str) -> Optional[
 def get_all_vehicle_metadata(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     return conn.execute("SELECT * FROM vehicles ORDER BY vehicle_id").fetchall()
 
-
-# ----------------------------------------------------------------------
-# Live vehicle state — position + activity, written by scripts/live_feed.py
-# ----------------------------------------------------------------------
 def upsert_vehicle_live_state(
     conn: sqlite3.Connection, vehicle_id: str, latitude: float, longitude: float,
     status: str, last_moved_at: str, updated_at: str,
@@ -651,10 +519,6 @@ def get_vehicle_live_state(conn: sqlite3.Connection, vehicle_id: str) -> Optiona
 def get_all_vehicle_live_state(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     return conn.execute("SELECT * FROM vehicle_live_state ORDER BY vehicle_id").fetchall()
 
-
-# ----------------------------------------------------------------------
-# Query helpers — consumed by models/ (Phase 3) and dashboard/ (Phase 5)
-# ----------------------------------------------------------------------
 def get_all_vehicle_ids(conn: sqlite3.Connection) -> List[str]:
     rows = conn.execute("SELECT DISTINCT vehicle_id FROM telemetry ORDER BY vehicle_id").fetchall()
     return [r["vehicle_id"] for r in rows]
@@ -685,8 +549,6 @@ def get_commands_for_vehicle(conn: sqlite3.Connection, vehicle_id: str) -> List[
 
 
 def get_unticketed_commands(conn: sqlite3.Connection, vehicle_id: Optional[str] = None) -> List[sqlite3.Row]:
-    """Commands with no matching maintenance ticket — the core security-anomaly
-    precondition described in the project doc (section 7.1)."""
     if vehicle_id:
         return conn.execute(
             "SELECT * FROM commands WHERE vehicle_id = ? AND ticket_id IS NULL ORDER BY timestamp",
@@ -709,8 +571,6 @@ def row_counts(conn: sqlite3.Connection) -> dict:
 
 
 if __name__ == "__main__":
-    # Standalone smoke test: generate fresh simulator data, validate it through
-    # schemas.py, load it into a scratch SQLite DB, and confirm round-trip counts.
     from simulator.config import SimulatorConfig
     from simulator.telemetry_generator import TelemetryGenerator
     from simulator.maintenance_generator import MaintenanceGenerator

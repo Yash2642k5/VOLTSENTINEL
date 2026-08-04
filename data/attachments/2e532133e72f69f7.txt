@@ -1,0 +1,3 @@
+[attack_injector] 2 vehicle(s) affected, 10 attack command(s) injected out of 33 total commands.
+[actions] MAINTENANCE TICKET ACT-341C96915A opened for EVR-0001 (priority=medium, email_sent=False): test trigger 1
+[actions] MAINTENANCE TICKET ACT-6C053FF69A opened for EVR-0001 (priority=medium, email_sent=False): test trigger 2
